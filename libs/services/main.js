@@ -130,11 +130,33 @@ module.exports = fp(async (fastify, options) => {
     return task;
   };
 
-  const cancel = async ({ id }) => {
-    const task = await detail({ id });
-    return await task.update({
-      status: 'canceled'
-    });
+  const cancel = async ({ id, targetId, targetType }) => {
+    if (targetId && targetType) {
+      return await models.task.update(
+        {
+          status: 'canceled'
+        },
+        {
+          where: {
+            targetId,
+            targetType,
+            status: {
+              [Op.in]: ['pending', 'running']
+            }
+          }
+        }
+      );
+    }
+    if (id) {
+      const task = await detail({ id });
+      if (!['pending', 'running'].includes(task.type)) {
+        throw new Error('任务状态不允许取消');
+      }
+      return await task.update({
+        status: 'canceled'
+      });
+    }
+    throw new Error('参数错误');
   };
 
   const complete = async ({ id, userId, output, ...props }) => {
