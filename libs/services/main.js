@@ -85,14 +85,14 @@ module.exports = fp(async (fastify, options) => {
           status: 'success',
           output: result,
           progress: 100,
-          completeAt: new Date()
+          completedAt: new Date()
         });
       })
       .catch(error => {
         return task.update({
           status: 'failed',
           error: error.toString(),
-          completeAt: new Date()
+          completedAt: new Date()
         });
       });
   };
@@ -141,7 +141,7 @@ module.exports = fp(async (fastify, options) => {
     const task = await detail({ id });
     await task.update(
       Object.assign({}, props, {
-        completeAt: new Date(),
+        completedAt: new Date(),
         completedUserId: userId
       })
     );
