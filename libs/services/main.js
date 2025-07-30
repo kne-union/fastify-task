@@ -42,7 +42,7 @@ module.exports = fp(async (fastify, options) => {
         });
       },
       complete: async result => {
-        await options.task[task.type](result);
+        await options.task[task.type]({ task, result });
         await task.update({
           status: 'success',
           output: result,
