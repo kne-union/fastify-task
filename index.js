@@ -11,7 +11,7 @@ module.exports = fp(
         name: 'task',
         limit: 10,
         dir: path.resolve(process.cwd(), 'libs', 'tasks'),
-        syncCron: '*/10 * * * *',
+        cronTime: '*/10 * * * *',
         scriptName: 'index',
         maxPollTimes: 100,
         pollInterval: 5000,
@@ -45,9 +45,9 @@ module.exports = fp(
 
     fastify.register(
       require('fastify-plugin')(async fastify => {
-        if (options.syncCron) {
+        if (options.cronTime) {
           fastify.cron.createJob({
-            cronTime: options.syncCron,
+            cronTime: options.cronTime,
             onTick: async () => {
               const { runner } = fastify[options.name].services;
               await runner();
