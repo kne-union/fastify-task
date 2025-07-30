@@ -62,7 +62,8 @@ module.exports = fp(async (fastify, options) => {
       }
     },
     async request => {
-      return services.complete(Object.assign({}, request.body, { userId: request.userInfo?.id }));
+      await services.complete(Object.assign({}, request.body, { userId: request.userInfo?.id }));
+      return {};
     }
   );
 
@@ -84,6 +85,27 @@ module.exports = fp(async (fastify, options) => {
     },
     async request => {
       return services.cancel(request.body);
+    }
+  );
+
+  fastify.post(
+    `${options.prefix}/retry`,
+    {
+      onRequest: options.getAuthenticate('write'),
+      schema: {
+        summary: '重试任务',
+        body: {
+          type: 'object',
+          properties: {
+            id: {
+              type: 'string'
+            }
+          }
+        }
+      }
+    },
+    async request => {
+      return services.retry(request.body);
     }
   );
 });
