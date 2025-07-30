@@ -1,11 +1,11 @@
 const fp = require('fastify-plugin');
 const path = require('node:path');
-const fs = require('node:fs/promises');
+const fs = require('fs-extra');
 
 module.exports = fp(async (fastify, options) => {
   const { models } = fastify[options.name];
   const { Op } = fastify.sequelize.Sequelize;
-  const create = async ({ userId, input, type, targetId, targetType, runnerType, delay, scriptName, options }) => {
+  const create = async ({ userId, input, type, targetId, targetType, runnerType, delay, scriptName, options: currentOptions }) => {
     if (typeof options.task[type] !== 'function') {
       throw new Error('未找到合法的任务声明');
     }
@@ -18,17 +18,31 @@ module.exports = fp(async (fastify, options) => {
       runnerType,
       startTime: delay > 0 ? new Date(Date.now() + 1000 * delay) : new Date(),
       scriptName,
-      options
+      options: currentOptions
     });
   };
 
+  const resetAll = async () => {
+    await models.task.update(
+      {
+        status: 'pending'
+      },
+      {
+        where: {
+          status: 'running'
+        }
+      }
+    );
+  };
+
   const processSystemTask = async task => {
-    const taskModulePath = path.resolve(options.dir, task.scriptName || options.scriptName);
+    const taskModulePath = path.resolve(options.dir, task.type, `${task.scriptName || options.scriptName}.js`);
     if (!(await fs.exists(taskModulePath))) {
       await task.update({
         status: 'failed',
-        error: '未匹配到任务执行器'
+        error: `未匹配到任务执行器:${taskModulePath}`
       });
+      return;
     }
     await task.update({
       status: 'running',
@@ -41,7 +55,31 @@ module.exports = fp(async (fastify, options) => {
           progress
         });
       },
-      complete: async result => {
+      polling: async (callback, currentOptions) => {
+        let pollCount = 0;
+        const maxPollTimes = currentOptions?.maxPollTimes || options.maxPollTimes;
+        const pollInterval = currentOptions?.pollInterval || options.pollInterval;
+        return await new Promise((resolve, reject) => {
+          const timer = setInterval(async () => {
+            pollCount++;
+            if (pollCount > maxPollTimes) {
+              clearInterval(timer);
+              reject(`轮询超时（${maxPollTimes}次），任务未完成`);
+            }
+            const { result, data, message } = Object.assign({}, await callback());
+            if (result === 'failed') {
+              clearInterval(timer);
+              reject(`任务处理失败:${message}`);
+            }
+            if (result === 'success') {
+              clearInterval(timer);
+              resolve(data);
+            }
+          }, pollInterval);
+        });
+      }
+    })
+      .then(async result => {
         await options.task[task.type]({ task, result });
         await task.update({
           status: 'success',
@@ -49,37 +87,14 @@ module.exports = fp(async (fastify, options) => {
           progress: 100,
           completeAt: new Date()
         });
-      },
-      polling: async (callback, currentOptions) => {
-        let pollCount = 0;
-        const maxPollTimes = currentOptions.maxPollTimes || options.maxPollTimes;
-        const pollInterval = currentOptions.pollInterval || options.pollInterval;
-        await new Promise((resolve, reject) => {
-          const timer = setInterval(async () => {
-            pollCount++;
-            if (pollCount > maxPollTimes) {
-              clearInterval(timer);
-              reject(`轮询超时（${maxPollTimes}次），任务未完成`);
-            }
-            const { result, message } = await callback();
-            if (result === 'failed') {
-              clearInterval(timer);
-              reject(`任务处理失败:${message}`);
-            }
-            if (result === 'success') {
-              clearInterval(timer);
-              resolve();
-            }
-          }, pollInterval);
+      })
+      .catch(error => {
+        return task.update({
+          status: 'failed',
+          error: error.toString(),
+          completeAt: new Date()
         });
-      }
-    }).catch(error => {
-      return task.update({
-        status: 'failed',
-        error: error.toString(),
-        completeAt: new Date()
       });
-    });
   };
 
   const runner = async () => {
@@ -160,6 +175,7 @@ module.exports = fp(async (fastify, options) => {
     list,
     complete,
     cancel,
-    runner
+    runner,
+    resetAll
   });
 });
