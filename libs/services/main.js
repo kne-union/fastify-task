@@ -150,13 +150,12 @@ module.exports = fp(async (fastify, options) => {
     if (id) {
       const task = await detail({ id });
       if (!['pending', 'running'].includes(task.type)) {
-        throw new Error('任务状态不允许取消');
+        return;
       }
       return await task.update({
         status: 'canceled'
       });
     }
-    throw new Error('参数错误');
   };
 
   const complete = async ({ id, userId, output, ...props }) => {
