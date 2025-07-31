@@ -149,7 +149,7 @@ module.exports = fp(async (fastify, options) => {
     }
     if (id) {
       const task = await detail({ id });
-      if (!['pending', 'running'].includes(task.type)) {
+      if (!['pending', 'running'].includes(task.status)) {
         return;
       }
       return await task.update({
