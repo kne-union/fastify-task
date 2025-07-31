@@ -84,7 +84,8 @@ module.exports = fp(async (fastify, options) => {
       }
     },
     async request => {
-      return services.cancel(request.body);
+      await services.cancel(request.body);
+      return {};
     }
   );
 
@@ -105,7 +106,8 @@ module.exports = fp(async (fastify, options) => {
       }
     },
     async request => {
-      return services.retry(request.body);
+      await services.retry(request.body);
+      return {};
     }
   );
 });
