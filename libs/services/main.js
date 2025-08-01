@@ -106,6 +106,17 @@ module.exports = fp(async (fastify, options) => {
   };
 
   const runner = async () => {
+    const runningTaskCount = await models.task.count({
+      where: {
+        runnerType: 'system',
+        status: 'running'
+      }
+    });
+    const limit = options.limit - runningTaskCount;
+    if (limit <= 0) {
+      fastify.log.info(`当前运行中的系统任务数(${runningTaskCount})已达上限(${options.limit})，暂不执行新任务`);
+      return;
+    }
     const pendingTasks = await models.task.findAll({
       where: {
         runnerType: 'system',
