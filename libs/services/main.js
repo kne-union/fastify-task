@@ -48,53 +48,61 @@ module.exports = fp(async (fastify, options) => {
       status: 'running',
       progress: 0
     });
-    require(taskModulePath)(fastify, options, {
-      task,
-      progress: async progress => {
-        await task.update({
-          progress
-        });
-      },
-      polling: async (callback, currentOptions) => {
-        let pollCount = 0;
-        const maxPollTimes = currentOptions?.maxPollTimes || options.maxPollTimes;
-        const pollInterval = currentOptions?.pollInterval || options.pollInterval;
-        return await new Promise((resolve, reject) => {
-          const timer = setInterval(async () => {
-            pollCount++;
-            if (pollCount > maxPollTimes) {
-              clearInterval(timer);
-              reject(`轮询超时（${maxPollTimes}次），任务未完成`);
-            }
-            const { result, data, message } = Object.assign({}, await callback());
-            if (result === 'failed') {
-              clearInterval(timer);
-              reject(`任务处理失败:${message}`);
-            }
-            if (result === 'success') {
-              clearInterval(timer);
-              resolve(data);
-            }
-          }, pollInterval);
-        });
-      }
-    })
-      .then(async result => {
-        await options.task[task.type]({ task, result });
-        await task.update({
-          status: 'success',
-          output: result,
-          progress: 100,
-          completedAt: new Date()
-        });
+    try {
+      require(taskModulePath)(fastify, options, {
+        task,
+        progress: async progress => {
+          await task.update({
+            progress
+          });
+        },
+        polling: async (callback, currentOptions) => {
+          let pollCount = 0;
+          const maxPollTimes = currentOptions?.maxPollTimes || options.maxPollTimes;
+          const pollInterval = currentOptions?.pollInterval || options.pollInterval;
+          return await new Promise((resolve, reject) => {
+            const timer = setInterval(async () => {
+              pollCount++;
+              if (pollCount > maxPollTimes) {
+                clearInterval(timer);
+                reject(`轮询超时（${maxPollTimes}次），任务未完成`);
+              }
+              const { result, data, message } = Object.assign({}, await callback());
+              if (result === 'failed') {
+                clearInterval(timer);
+                reject(`任务处理失败:${message}`);
+              }
+              if (result === 'success') {
+                clearInterval(timer);
+                resolve(data);
+              }
+            }, pollInterval);
+          });
+        }
       })
-      .catch(error => {
-        return task.update({
-          status: 'failed',
-          error: error.toString(),
-          completedAt: new Date()
+        .then(async result => {
+          await options.task[task.type]({ task, result });
+          await task.update({
+            status: 'success',
+            output: result,
+            progress: 100,
+            completedAt: new Date()
+          });
+        })
+        .catch(error => {
+          return task.update({
+            status: 'failed',
+            error: error.toString(),
+            completedAt: new Date()
+          });
         });
+    } catch (error) {
+      await task.update({
+        status: 'failed',
+        error: error.toString(),
+        completedAt: new Date()
       });
+    }
   };
 
   const runner = async () => {
