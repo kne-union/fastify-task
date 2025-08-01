@@ -92,14 +92,14 @@ module.exports = fp(async (fastify, options) => {
         .catch(error => {
           return task.update({
             status: 'failed',
-            error: error.toString(),
+            error: error.stack,
             completedAt: new Date()
           });
         });
     } catch (error) {
       await task.update({
         status: 'failed',
-        error: error.toString(),
+        error: error.stack,
         completedAt: new Date()
       });
     }
