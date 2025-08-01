@@ -35,51 +35,48 @@ module.exports = fp(async (fastify, options) => {
     );
   };
 
-  const processSystemTask = async task => {
-    const taskModulePath = path.resolve(options.dir, task.type, `${task.scriptName || options.scriptName}.js`);
+  const executor = async ({ type, scriptName, ...props }) => {
+    const taskModulePath = path.resolve(options.dir, type, `${scriptName || options.scriptName}.js`);
     if (!(await fs.exists(taskModulePath))) {
-      await task.update({
-        status: 'failed',
-        error: `未匹配到任务执行器:${taskModulePath}`
-      });
-      return;
+      throw new Error(`未匹配到任务执行器:${taskModulePath}`);
     }
-    await task.update({
-      status: 'running',
-      progress: 0
+    return await require(taskModulePath)(fastify, options, {
+      ...props,
+      polling: async (callback, currentOptions) => {
+        let pollCount = 0;
+        const maxPollTimes = currentOptions?.maxPollTimes || options.maxPollTimes;
+        const pollInterval = currentOptions?.pollInterval || options.pollInterval;
+        return await new Promise((resolve, reject) => {
+          const timer = setInterval(async () => {
+            pollCount++;
+            if (pollCount > maxPollTimes) {
+              clearInterval(timer);
+              reject(`轮询超时（${maxPollTimes}次），任务未完成`);
+            }
+            const { result, data, message } = Object.assign({}, await callback());
+            if (result === 'failed') {
+              clearInterval(timer);
+              reject(`任务处理失败:${message}`);
+            }
+            if (result === 'success') {
+              clearInterval(timer);
+              resolve(data);
+            }
+          }, pollInterval);
+        });
+      }
     });
+  };
+
+  const processSystemTask = async task => {
     try {
-      require(taskModulePath)(fastify, options, {
-        task,
-        progress: async progress => {
-          await task.update({
-            progress
-          });
-        },
-        polling: async (callback, currentOptions) => {
-          let pollCount = 0;
-          const maxPollTimes = currentOptions?.maxPollTimes || options.maxPollTimes;
-          const pollInterval = currentOptions?.pollInterval || options.pollInterval;
-          return await new Promise((resolve, reject) => {
-            const timer = setInterval(async () => {
-              pollCount++;
-              if (pollCount > maxPollTimes) {
-                clearInterval(timer);
-                reject(`轮询超时（${maxPollTimes}次），任务未完成`);
-              }
-              const { result, data, message } = Object.assign({}, await callback());
-              if (result === 'failed') {
-                clearInterval(timer);
-                reject(`任务处理失败:${message}`);
-              }
-              if (result === 'success') {
-                clearInterval(timer);
-                resolve(data);
-              }
-            }, pollInterval);
-          });
-        }
-      })
+      await task.update({
+        status: 'running',
+        progress: 0,
+        error: null,
+        output: null
+      });
+      executor({ type: task.type, scriptName: task.scriptName, task })
         .then(async result => {
           await options.task[task.type]({ task, result });
           await task.update({
@@ -89,17 +86,17 @@ module.exports = fp(async (fastify, options) => {
             completedAt: new Date()
           });
         })
-        .catch(error => {
+        .catch(e => {
           return task.update({
             status: 'failed',
-            error: error.stack,
+            error: e.stack,
             completedAt: new Date()
           });
         });
-    } catch (error) {
+    } catch (e) {
       await task.update({
         status: 'failed',
-        error: error.stack,
+        error: e.stack,
         completedAt: new Date()
       });
     }
@@ -241,6 +238,7 @@ module.exports = fp(async (fastify, options) => {
     cancel,
     runner,
     resetAll,
-    retry
+    retry,
+    executor
   });
 });
