@@ -146,8 +146,8 @@ module.exports = fp(async (fastify, options) => {
     return task;
   };
 
-  const cancel = async ({ id, targetId, targetType }) => {
-    if (targetId && targetType) {
+  const cancel = async ({ id, targetId, targetType, type }) => {
+    if (targetId && targetType && type) {
       return await models.task.update(
         {
           status: 'canceled'
@@ -156,6 +156,7 @@ module.exports = fp(async (fastify, options) => {
           where: {
             targetId,
             targetType,
+            type,
             status: {
               [Op.in]: ['pending', 'running']
             }
