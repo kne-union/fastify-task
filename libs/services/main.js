@@ -57,12 +57,12 @@ module.exports = fp(async (fastify, options) => {
             pollCount++;
             if (pollCount > maxPollTimes) {
               clearInterval(timer);
-              reject(`轮询超时（${maxPollTimes}次），任务未完成`);
+              reject(new Error(`轮询超时（${maxPollTimes}次），任务未完成`));
             }
             const { result, data, message } = Object.assign({}, await callback());
             if (result === 'failed') {
               clearInterval(timer);
-              reject(`任务处理失败:${message}`);
+              reject(new Error(`任务处理失败:${message}`));
             }
             if (result === 'success') {
               clearInterval(timer);
@@ -95,14 +95,14 @@ module.exports = fp(async (fastify, options) => {
         .catch(e => {
           return task.update({
             status: 'failed',
-            error: e.stack,
+            error: (e.stack || '').replaceAll(process.cwd(), '/server'),
             completedAt: new Date()
           });
         });
     } catch (e) {
       await task.update({
         status: 'failed',
-        error: e.stack,
+        error: (e.stack || '').replaceAll(process.cwd(), '/server'),
         completedAt: new Date()
       });
     }
