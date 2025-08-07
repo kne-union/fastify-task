@@ -1,6 +1,6 @@
 {
   "name": "@kne/fastify-task",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "description": "用于编排任务，追踪任务执行状态，结果",
   "main": "index.js",
   "scripts": {

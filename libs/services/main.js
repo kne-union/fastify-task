@@ -42,6 +42,12 @@ module.exports = fp(async (fastify, options) => {
     }
     return await require(taskModulePath)(fastify, options, {
       ...props,
+      setProgress: async progress => {
+        props.task &&
+          (await props.task.update({
+            progress: progress
+          }));
+      },
       polling: async (callback, currentOptions) => {
         let pollCount = 0;
         const maxPollTimes = currentOptions?.maxPollTimes || options.maxPollTimes;
