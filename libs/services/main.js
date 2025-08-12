@@ -43,7 +43,7 @@ module.exports = fp(async (fastify, options) => {
     return await require(taskModulePath)(fastify, options, {
       ...props,
       updateProgress: async progress => {
-        props.task &&
+        typeof props?.task?.update === 'function' &&
           (await props.task.update({
             progress: progress
           }));
