@@ -132,7 +132,11 @@ module.exports = fp(async (fastify, options) => {
         status: 'running',
         progress: 0,
         error: null,
-        output: null
+        output: null,
+        pollCount: 0,
+        pollResults: [],
+        completedAt: null,
+        context: {}
       });
       executor({ type: task.type, scriptName: task.scriptName, task })
         .then(async result => {
