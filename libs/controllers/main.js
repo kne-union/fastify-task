@@ -110,4 +110,33 @@ module.exports = fp(async (fastify, options) => {
       return {};
     }
   );
+
+  fastify.post(
+    `${options.prefix}/next`,
+    {
+      schema: {
+        summary: '处理任务next',
+        body: {
+          type: 'object',
+          properties: {
+            id: {
+              type: 'string',
+              description: '任务ID'
+            },
+            signature: {
+              type: 'string',
+              description: '签名'
+            },
+            result: {
+              type: 'string',
+              description: '结果'
+            }
+          }
+        }
+      }
+    },
+    async request => {
+      return await services.processNext(request.body);
+    }
+  );
 });

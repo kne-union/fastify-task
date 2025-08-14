@@ -13,8 +13,8 @@ module.exports = fp(
         dir: path.resolve(process.cwd(), 'libs', 'tasks'),
         cronTime: '*/10 * * * *',
         scriptName: 'index',
-        maxPollTimes: 100,
-        pollInterval: 5000,
+        maxPollTimes: 20,
+        pollInterval: 10000,
         getUserModel: () => {
           return fastify.account.models.user;
         },

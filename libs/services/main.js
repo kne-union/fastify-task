@@ -59,7 +59,21 @@ module.exports = fp(async (fastify, options) => {
               clearInterval(timer);
               reject(new Error(`轮询超时（${maxPollTimes}次），任务未完成`));
             }
-            const { result, data, message } = Object.assign({}, await callback());
+            const pollingResult = Object.assign({}, await callback());
+            const { result, data, message, progress } = pollingResult;
+            if (typeof props?.task?.update === 'function') {
+              await props.task.reload();
+              await props.task.update(
+                Object.assign(
+                  {},
+                  {
+                    pollCount: props.task.pollCount + 1,
+                    pollResults: [...props.task.pollResults, Object.assign({}, pollingResult, { time: new Date() })]
+                  },
+                  Number.isInteger(progress) ? { progress } : {}
+                )
+              );
+            }
             if (result === 'failed') {
               clearInterval(timer);
               reject(new Error(`任务处理失败:${message}`));
@@ -70,7 +84,45 @@ module.exports = fp(async (fastify, options) => {
             }
           }, pollInterval);
         });
+      },
+      next: async context => {
+        if (typeof props?.task?.update === 'function') {
+          await props.task.update({ context, status: 'waiting' });
+        }
+        return false;
       }
+    });
+  };
+
+  const processNext = async ({ id, signature, result: resultStr }) => {
+    const task = await detail({ id });
+    if (task.status !== 'waiting') {
+      throw new Error('当前任务状态不允许执行Next操作');
+    }
+    if (task.context?.secret) {
+      const dataToSign = `${id}|${resultStr}`;
+      // 使用 HMAC-SHA256 生成签名
+      const hmac = crypto.createHmac('sha256', task.context.secret);
+      hmac.update(dataToSign);
+      if (signature !== hmac.digest('hex')) {
+        throw new Error('签名验证失败');
+      }
+    }
+    const result = JSON.parse(resultStr);
+    if (result.code !== 0) {
+      await task.update({
+        status: 'failed',
+        error: result,
+        completedAt: new Date()
+      });
+      return;
+    }
+    await options.task[task.type]({ task, result: result.data, context: task.context });
+    await task.update({
+      status: 'success',
+      output: result,
+      progress: 100,
+      completedAt: new Date()
     });
   };
 
@@ -84,7 +136,10 @@ module.exports = fp(async (fastify, options) => {
       });
       executor({ type: task.type, scriptName: task.scriptName, task })
         .then(async result => {
-          await options.task[task.type]({ task, result });
+          if (result === false) {
+            return;
+          }
+          await options.task[task.type]({ task, result, context: task.context });
           await task.update({
             status: 'success',
             output: result,
@@ -246,6 +301,7 @@ module.exports = fp(async (fastify, options) => {
     runner,
     resetAll,
     retry,
-    executor
+    executor,
+    processNext
   });
 });
