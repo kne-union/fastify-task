@@ -46,9 +46,24 @@ module.exports = ({ DataTypes, definePrimaryType, options }) => {
         comment: '错误信息'
       },
       status: {
-        type: DataTypes.ENUM('pending', 'running', 'success', 'failed', 'canceled'),
+        type: DataTypes.ENUM('pending', 'running', 'waiting', 'success', 'failed', 'canceled'),
         comment: '任务状态',
         defaultValue: 'pending'
+      },
+      context: {
+        type: DataTypes.JSON,
+        comment: '上下文信息',
+        defaultValue: {}
+      },
+      pollResults: {
+        type: DataTypes.JSON,
+        comment: '轮询执行结果',
+        defaultValue: []
+      },
+      pollCount: {
+        type: DataTypes.INTEGER,
+        comment: '轮询次数',
+        defaultValue: 0
       },
       progress: {
         type: DataTypes.INTEGER,
