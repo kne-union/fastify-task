@@ -59,28 +59,32 @@ module.exports = fp(async (fastify, options) => {
               clearInterval(timer);
               reject(new Error(`轮询超时（${maxPollTimes}次），任务未完成`));
             }
-            const pollingResult = Object.assign({}, await callback());
-            const { result, data, message, progress } = pollingResult;
-            if (typeof props?.task?.update === 'function') {
-              await props.task.reload();
-              await props.task.update(
-                Object.assign(
-                  {},
-                  {
-                    pollCount: props.task.pollCount + 1,
-                    pollResults: [...props.task.pollResults, Object.assign({}, pollingResult, { time: new Date() })]
-                  },
-                  Number.isInteger(progress) ? { progress } : {}
-                )
-              );
-            }
-            if (result === 'failed') {
-              clearInterval(timer);
-              reject(new Error(`任务处理失败:${message}`));
-            }
-            if (result === 'success') {
-              clearInterval(timer);
-              resolve(data);
+            try {
+              const pollingResult = Object.assign({}, await callback());
+              const { result, data, message, progress } = pollingResult;
+              if (typeof props?.task?.update === 'function') {
+                await props.task.reload();
+                await props.task.update(
+                  Object.assign(
+                    {},
+                    {
+                      pollCount: props.task.pollCount + 1,
+                      pollResults: [...props.task.pollResults, Object.assign({}, pollingResult, { time: new Date() })]
+                    },
+                    Number.isInteger(progress) ? { progress } : {}
+                  )
+                );
+              }
+              if (result === 'failed') {
+                clearInterval(timer);
+                reject(new Error(`任务处理失败:${message}`));
+              }
+              if (result === 'success') {
+                clearInterval(timer);
+                resolve(data);
+              }
+            } catch (e) {
+              reject(e);
             }
           }, pollInterval);
         });
