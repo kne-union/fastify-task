@@ -310,6 +310,7 @@ module.exports = fp(async (fastify, options) => {
     resetAll,
     retry,
     executor,
-    processNext
+    processNext,
+    processSystemTask
   });
 });
