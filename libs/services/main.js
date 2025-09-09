@@ -288,7 +288,7 @@ module.exports = fp(async (fastify, options) => {
     };
   };
 
-  const retry = async ({ id }) => {
+  const retryFunc = async ({ id }) => {
     const task = await detail({ id });
     if (task.status !== 'failed') {
       throw new Error('只有失败的任务允许重试');
@@ -298,6 +298,17 @@ module.exports = fp(async (fastify, options) => {
       completedAt: null,
       completedUserId: null
     });
+  };
+
+  const retry = async ({ id, taskIds }) => {
+    if (id) {
+      await retryFunc({ id });
+    }
+    if (taskIds && taskIds.length > 0) {
+      for (const taskId of taskIds) {
+        await retryFunc({ id: taskId });
+      }
+    }
   };
 
   Object.assign(fastify[options.name].services, {

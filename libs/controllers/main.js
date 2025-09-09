@@ -100,6 +100,12 @@ module.exports = fp(async (fastify, options) => {
           properties: {
             id: {
               type: 'string'
+            },
+            taskIds: {
+              type: 'array',
+              items: {
+                type: 'string'
+              }
             }
           }
         }
