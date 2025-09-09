@@ -1,10 +1,12 @@
 {
   "name": "@kne/fastify-task",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "用于编排任务，追踪任务执行状态，结果",
   "main": "index.js",
   "scripts": {
     "init": "husky",
+    "dev": "nodemon ./index.js",
+    "start": "node ./index.js",
     "build:md": "npx @kne/md-doc",
     "start:md": "npx @kne/md-doc --watch",
     "prettier": "prettier --config .prettierrc --write '{libs/**/*,index}.{js,jsx,ts,tsx,json,css,scss}'",

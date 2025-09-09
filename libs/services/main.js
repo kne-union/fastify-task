@@ -275,11 +275,23 @@ module.exports = fp(async (fastify, options) => {
       }
     });
 
+    // 处理completedAt排序
+    let orderBy = 'createdAt';
+    let orderDirection = 'DESC';
+
+    if (filter && filter.completedAt) {
+      const completedAtValue = filter.completedAt.toUpperCase();
+      if (['ASC', 'DESC'].includes(completedAtValue)) {
+        orderBy = 'completedAt';
+        orderDirection = completedAtValue;
+      }
+    }
+
     const { rows, count } = await models.task.findAndCountAll({
       where: Object.assign({}, whereQuery),
       offset: perPage * (currentPage - 1),
       limit: perPage,
-      order: [['createdAt', 'DESC']]
+      order: [[orderBy, orderDirection]]
     });
 
     return {
@@ -288,7 +300,7 @@ module.exports = fp(async (fastify, options) => {
     };
   };
 
-  const retry = async ({ id }) => {
+  const retryFunc = async ({ id }) => {
     const task = await detail({ id });
     if (task.status !== 'failed') {
       throw new Error('只有失败的任务允许重试');
@@ -298,6 +310,17 @@ module.exports = fp(async (fastify, options) => {
       completedAt: null,
       completedUserId: null
     });
+  };
+
+  const retry = async ({ id, taskIds }) => {
+    if (id) {
+      await retryFunc({ id });
+    }
+    if (taskIds && taskIds.length > 0) {
+      for (const taskId of taskIds) {
+        await retryFunc({ id: taskId });
+      }
+    }
   };
 
   Object.assign(fastify[options.name].services, {
