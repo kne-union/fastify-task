@@ -275,11 +275,23 @@ module.exports = fp(async (fastify, options) => {
       }
     });
 
+    // 处理completedAt排序
+    let orderBy = 'createdAt';
+    let orderDirection = 'DESC';
+
+    if (filter && filter.completedAt) {
+      const completedAtValue = filter.completedAt.toUpperCase();
+      if (['ASC', 'DESC'].includes(completedAtValue)) {
+        orderBy = 'completedAt';
+        orderDirection = completedAtValue;
+      }
+    }
+
     const { rows, count } = await models.task.findAndCountAll({
       where: Object.assign({}, whereQuery),
       offset: perPage * (currentPage - 1),
       limit: perPage,
-      order: [['createdAt', 'DESC']]
+      order: [[orderBy, orderDirection]]
     });
 
     return {

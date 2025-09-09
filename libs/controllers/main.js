@@ -20,7 +20,26 @@ module.exports = fp(async (fastify, options) => {
               default: 1
             },
             filter: {
-              type: 'object'
+              type: 'object',
+              properties: {
+                targetId: {
+                  type: 'string'
+                },
+                type: {
+                  type: 'string'
+                },
+                status: {
+                  type: 'string'
+                },
+                runnerType: {
+                  type: 'string'
+                },
+                completedAt: {
+                  type: 'string',
+                  enum: ['ASC', 'DESC'],
+                  description: '按completedAt字段排序，ASC为升序，DESC为降序'
+                }
+              }
             }
           }
         }
