@@ -302,8 +302,8 @@ module.exports = fp(async (fastify, options) => {
 
   const retryFunc = async ({ id }) => {
     const task = await detail({ id });
-    if (task.status !== 'failed') {
-      throw new Error('只有失败的任务允许重试');
+    if (['failed', 'canceled'].indexOf(task.status) === -1) {
+      throw new Error('只有失败或取消的任务允许重试');
     }
     await task.update({
       status: 'pending',
