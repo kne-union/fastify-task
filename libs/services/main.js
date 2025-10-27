@@ -246,15 +246,30 @@ module.exports = fp(async (fastify, options) => {
 
   const complete = async ({ id, userId, output, ...props }) => {
     const task = await detail({ id });
+    if (!task) {
+      throw new Error('任务不存在');
+    }
     if (props.status === 'success') {
-      await options.task[task.type]({ task, result: output });
-      await task.update({
-        status: 'success',
-        output,
-        progress: 100,
-        completedAt: new Date(),
-        completedUserId: userId
-      });
+      try {
+        await options.task[task.type]({ task, result: output });
+        await task.update({
+          status: 'success',
+          output,
+          progress: 100,
+          completedAt: new Date(),
+          completedUserId: userId
+        });
+      } catch (e) {
+        await task.update(
+          Object.assign({}, props, {
+            status: 'failed',
+            output,
+            error: (e.stack || '').replaceAll(process.cwd(), '/server'),
+            completedAt: new Date()
+          })
+        );
+        throw e;
+      }
     } else {
       await task.update(
         Object.assign({}, props, {
