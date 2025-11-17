@@ -22,7 +22,13 @@ module.exports = fp(async (fastify, options) => {
             filter: {
               type: 'object',
               properties: {
+                id: {
+                  type: 'string'
+                },
                 targetId: {
+                  type: 'string'
+                },
+                targetName: {
                   type: 'string'
                 },
                 type: {
@@ -34,12 +40,35 @@ module.exports = fp(async (fastify, options) => {
                 runnerType: {
                   type: 'string'
                 },
+                createdAt: {
+                  type: 'object',
+                  properties: {
+                    startTime: {
+                      type: 'string'
+                    },
+                    endTime: {
+                      type: 'string'
+                    }
+                  },
+                  description: 'createdAt区间查找'
+                },
                 completedAt: {
-                  type: 'string',
-                  enum: ['ASC', 'DESC'],
-                  description: '按completedAt字段排序，ASC为升序，DESC为降序'
+                  type: 'object',
+                  properties: {
+                    startTime: {
+                      type: 'string'
+                    },
+                    endTime: {
+                      type: 'string'
+                    }
+                  },
+                  description: 'completedAt区间查找'
                 }
               }
+            },
+            sort: {
+              type: 'object',
+              description: '按completedAt、updatedAt字段排序，ASC为升序，DESC为降序'
             }
           }
         }
