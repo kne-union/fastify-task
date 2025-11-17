@@ -281,25 +281,61 @@ module.exports = fp(async (fastify, options) => {
     }
   };
 
-  const list = async ({ filter, perPage, currentPage }) => {
+  const getTimeQuery = fieldValue => {
+    const { startTime, endTime } = fieldValue;
+    if (!!startTime && !!endTime) {
+      // 两个日期都有值，使用between
+      return {
+        [Op.between]: [new Date(startTime), new Date(endTime)]
+      };
+    } else if (!!startTime) {
+      // 只有开始日期，大于等于
+      return {
+        [Op.gte]: new Date(startTime)
+      };
+    } else if (!!endTime) {
+      // 只有结束日期，小于等于
+      return {
+        [Op.lte]: new Date(endTime)
+      };
+    }
+  };
+
+  const list = async ({ filter, perPage, currentPage, sort }) => {
     const whereQuery = {};
 
-    ['targetId', 'type', 'status', 'runnerType'].forEach(key => {
+    ['id', 'targetId', 'type', 'status', 'runnerType'].forEach(key => {
       if (filter && filter[key]) {
         whereQuery[key] = filter[key];
       }
     });
 
-    // 处理completedAt排序
+    // 处理targetName模糊匹配，查询input.name字段
+    if (filter && filter.targetName) {
+      whereQuery['input.name'] = {
+        [Op.like]: `%${filter.targetName}%`
+      };
+    }
+
+    // 处理createdAt日期范围查询
+    if (filter && filter.createdAt) {
+      whereQuery.createdAt = getTimeQuery(filter.createdAt);
+    }
+
+    // 处理completedAt日期范围查询
+    if (filter && filter.completedAt) {
+      whereQuery.completedAt = getTimeQuery(filter.completedAt);
+    }
+
+    // 处理sort排序
     let orderBy = 'createdAt';
     let orderDirection = 'DESC';
 
-    if (filter && filter.completedAt) {
-      const completedAtValue = filter.completedAt.toUpperCase();
-      if (['ASC', 'DESC'].includes(completedAtValue)) {
-        orderBy = 'completedAt';
-        orderDirection = completedAtValue;
-      }
+    if (sort && Object.keys(sort).length > 0) {
+      Object.keys(sort).forEach(key => {
+        orderBy = key;
+        orderDirection = sort[key];
+      });
     }
 
     const { rows, count } = await models.task.findAndCountAll({
