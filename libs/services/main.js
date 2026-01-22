@@ -5,7 +5,17 @@ const fs = require('fs-extra');
 module.exports = fp(async (fastify, options) => {
   const { models } = fastify[options.name];
   const { Op } = fastify.sequelize.Sequelize;
-  const create = async ({ userId, input, type, targetId, targetType, runnerType, delay, scriptName, options: currentOptions }) => {
+  const create = async ({
+                          userId,
+                          input,
+                          type,
+                          targetId,
+                          targetType,
+                          runnerType,
+                          delay,
+                          scriptName,
+                          options: currentOptions
+                        }) => {
     if (typeof options.task[type] !== 'function') {
       throw new Error('未找到合法的任务声明');
     }
@@ -23,16 +33,13 @@ module.exports = fp(async (fastify, options) => {
   };
 
   const resetAll = async () => {
-    await models.task.update(
-      {
-        status: 'pending'
-      },
-      {
-        where: {
-          status: 'running'
-        }
+    await models.task.update({
+      status: 'pending'
+    }, {
+      where: {
+        status: 'running'
       }
-    );
+    });
   };
 
   const executor = async ({ type, scriptName, ...props }) => {
@@ -41,55 +48,54 @@ module.exports = fp(async (fastify, options) => {
       throw new Error(`未匹配到任务执行器:${taskModulePath}`);
     }
     return await require(taskModulePath)(fastify, options, {
-      ...props,
-      updateProgress: async progress => {
-        typeof props?.task?.update === 'function' &&
-          (await props.task.update({
-            progress: progress
-          }));
-      },
-      polling: async (callback, currentOptions) => {
+      ...props, updateProgress: async progress => {
+        typeof props?.task?.update === 'function' && (await props.task.update({
+          progress: progress
+        }));
+      }, polling: async (callback, currentOptions) => {
         let pollCount = 0;
         const maxPollTimes = currentOptions?.maxPollTimes || options.maxPollTimes;
         const pollInterval = currentOptions?.pollInterval || options.pollInterval;
         return await new Promise((resolve, reject) => {
-          const timer = setInterval(async () => {
-            pollCount++;
-            if (pollCount > maxPollTimes) {
-              clearInterval(timer);
-              reject(new Error(`轮询超时（${maxPollTimes}次），任务未完成`));
-            }
+          const executePolling = async () => {
             try {
+              pollCount++;
+              if (pollCount > maxPollTimes) {
+                reject(new Error(`轮询超时（${maxPollTimes}次），任务未完成`));
+                return;
+              }
+
               const pollingResult = Object.assign({}, await callback());
               const { result, data, message, progress } = pollingResult;
+
               if (typeof props?.task?.update === 'function') {
                 await props.task.reload();
-                await props.task.update(
-                  Object.assign(
-                    {},
-                    {
-                      pollCount: props.task.pollCount + 1,
-                      pollResults: [...props.task.pollResults, Object.assign({}, pollingResult, { time: new Date() })]
-                    },
-                    Number.isInteger(progress) ? { progress } : {}
-                  )
-                );
+                await props.task.update(Object.assign({}, {
+                  pollCount: props.task.pollCount + 1,
+                  pollResults: [...props.task.pollResults, Object.assign({}, pollingResult, { time: new Date() })]
+                }, Number.isInteger(progress) ? { progress } : {}));
               }
+
               if (result === 'failed') {
-                clearInterval(timer);
                 reject(new Error(`任务处理失败:${message}`));
+                return;
               }
+
               if (result === 'success') {
-                clearInterval(timer);
                 resolve(data);
+                return;
               }
+
+              // 任务未完成，等待pollInterval后继续执行
+              setTimeout(executePolling, pollInterval);
             } catch (e) {
               reject(e);
             }
-          }, pollInterval);
+          };
+          // 开始第一次轮询
+          setTimeout(executePolling, pollInterval);
         });
-      },
-      next: async context => {
+      }, next: async context => {
         if (typeof props?.task?.update === 'function') {
           await props.task.update({ context, status: 'waiting' });
         }
@@ -115,18 +121,13 @@ module.exports = fp(async (fastify, options) => {
     const result = JSON.parse(resultStr);
     if (result.code !== 0) {
       await task.update({
-        status: 'failed',
-        error: result,
-        completedAt: new Date()
+        status: 'failed', error: result, completedAt: new Date()
       });
       return;
     }
     await options.task[task.type]({ task, result: result.data, context: task.context });
     await task.update({
-      status: 'success',
-      output: result,
-      progress: 100,
-      completedAt: new Date()
+      status: 'success', output: result, progress: 100, completedAt: new Date()
     });
   };
 
@@ -149,24 +150,17 @@ module.exports = fp(async (fastify, options) => {
           }
           await options.task[task.type]({ task, result, context: task.context });
           await task.update({
-            status: 'success',
-            output: result,
-            progress: 100,
-            completedAt: new Date()
+            status: 'success', output: result, progress: 100, completedAt: new Date()
           });
         })
         .catch(e => {
           return task.update({
-            status: 'failed',
-            error: (e.stack || '').replaceAll(process.cwd(), '/server'),
-            completedAt: new Date()
+            status: 'failed', error: (e.stack || '').replaceAll(process.cwd(), '/server'), completedAt: new Date()
           });
         });
     } catch (e) {
       await task.update({
-        status: 'failed',
-        error: (e.stack || '').replaceAll(process.cwd(), '/server'),
-        completedAt: new Date()
+        status: 'failed', error: (e.stack || '').replaceAll(process.cwd(), '/server'), completedAt: new Date()
       });
     }
   };
@@ -174,8 +168,7 @@ module.exports = fp(async (fastify, options) => {
   const runner = async () => {
     const runningTaskCount = await models.task.count({
       where: {
-        runnerType: 'system',
-        status: 'running'
+        runnerType: 'system', status: 'running'
       }
     });
     const limit = options.limit - runningTaskCount;
@@ -185,19 +178,15 @@ module.exports = fp(async (fastify, options) => {
     }
     const pendingTasks = await models.task.findAll({
       where: {
-        runnerType: 'system',
-        status: 'pending',
-        startTime: {
+        runnerType: 'system', status: 'pending', startTime: {
           [Op.lte]: new Date()
         }
-      },
-      limit: options.limit
+      }, limit: options.limit
     });
 
     const count = await models.task.count({
       where: {
-        runnerType: 'system',
-        status: 'pending'
+        runnerType: 'system', status: 'pending'
       }
     });
 
@@ -217,21 +206,15 @@ module.exports = fp(async (fastify, options) => {
 
   const cancel = async ({ id, targetId, targetType, type }) => {
     if (targetId && targetType && type) {
-      return await models.task.update(
-        {
-          status: 'canceled'
-        },
-        {
-          where: {
-            targetId,
-            targetType,
-            type,
-            status: {
-              [Op.in]: ['pending', 'running']
-            }
+      return await models.task.update({
+        status: 'canceled'
+      }, {
+        where: {
+          targetId, targetType, type, status: {
+            [Op.in]: ['pending', 'running']
           }
         }
-      );
+      });
     }
     if (id) {
       const task = await detail({ id });
@@ -253,31 +236,18 @@ module.exports = fp(async (fastify, options) => {
       try {
         await options.task[task.type]({ task, result: output });
         await task.update({
-          status: 'success',
-          output,
-          progress: 100,
-          completedAt: new Date(),
-          completedUserId: userId
+          status: 'success', output, progress: 100, completedAt: new Date(), completedUserId: userId
         });
       } catch (e) {
-        await task.update(
-          Object.assign({}, props, {
-            status: 'failed',
-            output,
-            error: (e.stack || '').replaceAll(process.cwd(), '/server'),
-            completedAt: new Date()
-          })
-        );
+        await task.update(Object.assign({}, props, {
+          status: 'failed', output, error: (e.stack || '').replaceAll(process.cwd(), '/server'), completedAt: new Date()
+        }));
         throw e;
       }
     } else {
-      await task.update(
-        Object.assign({}, props, {
-          status: 'failed',
-          completedAt: new Date(),
-          completedUserId: userId
-        })
-      );
+      await task.update(Object.assign({}, props, {
+        status: 'failed', completedAt: new Date(), completedUserId: userId
+      }));
     }
   };
 
@@ -346,8 +316,7 @@ module.exports = fp(async (fastify, options) => {
     });
 
     return {
-      pageData: rows,
-      totalCount: count
+      pageData: rows, totalCount: count
     };
   };
 
@@ -357,9 +326,7 @@ module.exports = fp(async (fastify, options) => {
       throw new Error('只有失败或取消的任务允许重试');
     }
     await task.update({
-      status: 'pending',
-      completedAt: null,
-      completedUserId: null
+      status: 'pending', completedAt: null, completedUserId: null
     });
   };
 
@@ -375,16 +342,6 @@ module.exports = fp(async (fastify, options) => {
   };
 
   Object.assign(fastify[options.name].services, {
-    create,
-    detail,
-    list,
-    complete,
-    cancel,
-    runner,
-    resetAll,
-    retry,
-    executor,
-    processNext,
-    processSystemTask
+    create, detail, list, complete, cancel, runner, resetAll, retry, executor, processNext, processSystemTask
   });
 });
