@@ -251,6 +251,50 @@ module.exports = fp(async (fastify, options) => {
     }
   };
 
+  const waitingComplete = async ({ id, pollInterval = 1000, maxPollTimes = 20 }) => {
+    const task = await detail({ id });
+    if (!task) {
+      throw new Error('任务不存在');
+    }
+
+    if (task.status === 'pending') {
+      await processSystemTask(task);
+    }
+
+    let pollCount = 0;
+    return await new Promise((resolve, reject) => {
+      const executePolling = async () => {
+        try {
+          pollCount++;
+          if (pollCount > maxPollTimes) {
+            reject(new Error('任务超时'));
+            return;
+          }
+
+          await task.reload();
+          const { status, output, error } = task;
+
+          if (status === 'success') {
+            resolve(output);
+            return;
+          }
+
+          if (status === 'failed' || status === 'canceled') {
+            reject(new Error(error || `任务${status === 'failed' ? '失败' : '取消'}`));
+            return;
+          }
+
+          // 任务未完成，等待pollInterval后继续执行
+          setTimeout(executePolling, pollInterval);
+        } catch (e) {
+          reject(e);
+        }
+      };
+      // 开始第一次轮询
+      setTimeout(executePolling, pollInterval);
+    });
+  };
+
   const getTimeQuery = fieldValue => {
     const { startTime, endTime } = fieldValue;
     if (!!startTime && !!endTime) {
@@ -342,6 +386,17 @@ module.exports = fp(async (fastify, options) => {
   };
 
   Object.assign(fastify[options.name].services, {
-    create, detail, list, complete, cancel, runner, resetAll, retry, executor, processNext, processSystemTask
+    create,
+    detail,
+    list,
+    complete,
+    cancel,
+    runner,
+    resetAll,
+    retry,
+    executor,
+    processNext,
+    processSystemTask,
+    waitingComplete
   });
 });
