@@ -143,7 +143,10 @@ module.exports = fp(async (fastify, options) => {
         completedAt: null,
         context: {}
       });
-      executor({ type: task.type, scriptName: task.scriptName, task })
+      const addLog = (props) => {
+        return log(Object.assign({}, props, { taskId: task.id }));
+      };
+      executor({ type: task.type, scriptName: task.scriptName, task, log: addLog })
         .then(async result => {
           if (result === false) {
             return;
@@ -385,6 +388,27 @@ module.exports = fp(async (fastify, options) => {
     }
   };
 
+  const log = async ({ taskId, data, message = '' }) => {
+    const task = await detail({ id: taskId });
+    if (!task) {
+      throw new Error('任务不存在');
+    }
+
+    const currentOptions = task.options || {};
+    const logs = currentOptions.logs || [];
+    logs.push({
+      data, message, time: new Date()
+    });
+
+    await task.update({
+      options: {
+        ...currentOptions, logs
+      }
+    });
+
+    return task;
+  };
+
   Object.assign(fastify[options.name].services, {
     create,
     detail,
@@ -394,6 +418,7 @@ module.exports = fp(async (fastify, options) => {
     runner,
     resetAll,
     retry,
+    log,
     executor,
     processNext,
     processSystemTask,
