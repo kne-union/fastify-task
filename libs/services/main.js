@@ -1,21 +1,26 @@
 const fp = require('fastify-plugin');
 const path = require('node:path');
 const fs = require('fs-extra');
+const crypto = require('node:crypto');
 
 module.exports = fp(async (fastify, options) => {
   const { models } = fastify[options.name];
   const { Op } = fastify.sequelize.Sequelize;
-  const create = async ({
-                          userId,
-                          input,
-                          type,
-                          targetId,
-                          targetType,
-                          runnerType,
-                          delay,
-                          scriptName,
-                          options: currentOptions
-                        }) => {
+
+  const generateSignature = ({ secret, id, data }) => {
+    const dataToSign = `${id}|${typeof data === 'string' ? data : JSON.stringify(data)}`;
+    const hmac = crypto.createHmac('sha256', secret);
+    hmac.update(dataToSign);
+    return hmac.digest('hex');
+  };
+
+  const verifySignature = ({ secret, id, data, signature }) => {
+    if (!secret) return true;
+    const expectedSignature = generateSignature({ secret, id, data });
+    return signature === expectedSignature;
+  };
+
+  const create = async ({ userId, input, type, targetId, targetType, runnerType, delay, scriptName, options: currentOptions }) => {
     if (typeof options.task[type] !== 'function') {
       throw new Error('未找到合法的任务声明');
     }
@@ -33,13 +38,16 @@ module.exports = fp(async (fastify, options) => {
   };
 
   const resetAll = async () => {
-    await models.task.update({
-      status: 'pending'
-    }, {
-      where: {
-        status: 'running'
+    await models.task.update(
+      {
+        status: 'pending'
+      },
+      {
+        where: {
+          status: 'running'
+        }
       }
-    });
+    );
   };
 
   const executor = async ({ type, scriptName, ...props }) => {
@@ -48,11 +56,14 @@ module.exports = fp(async (fastify, options) => {
       throw new Error(`未匹配到任务执行器:${taskModulePath}`);
     }
     return await require(taskModulePath)(fastify, options, {
-      ...props, updateProgress: async progress => {
-        typeof props?.task?.update === 'function' && (await props.task.update({
-          progress: progress
-        }));
-      }, polling: async (callback, currentOptions) => {
+      ...props,
+      updateProgress: async progress => {
+        typeof props?.task?.update === 'function' &&
+          (await props.task.update({
+            progress: progress
+          }));
+      },
+      polling: async (callback, currentOptions) => {
         let pollCount = 0;
         const maxPollTimes = currentOptions?.maxPollTimes || options.maxPollTimes;
         const pollInterval = currentOptions?.pollInterval || options.pollInterval;
@@ -70,10 +81,16 @@ module.exports = fp(async (fastify, options) => {
 
               if (typeof props?.task?.update === 'function') {
                 await props.task.reload();
-                await props.task.update(Object.assign({}, {
-                  pollCount: props.task.pollCount + 1,
-                  pollResults: [...props.task.pollResults, Object.assign({}, pollingResult, { time: new Date() })]
-                }, Number.isInteger(progress) ? { progress } : {}));
+                await props.task.update(
+                  Object.assign(
+                    {},
+                    {
+                      pollCount: props.task.pollCount + 1,
+                      pollResults: [...props.task.pollResults, Object.assign({}, pollingResult, { time: new Date() })]
+                    },
+                    Number.isInteger(progress) ? { progress } : {}
+                  )
+                );
               }
 
               if (result === 'failed') {
@@ -95,7 +112,8 @@ module.exports = fp(async (fastify, options) => {
           // 开始第一次轮询
           setTimeout(executePolling, pollInterval);
         });
-      }, next: async context => {
+      },
+      next: async context => {
         if (typeof props?.task?.update === 'function') {
           await props.task.update({ context, status: 'waiting' });
         }
@@ -109,25 +127,24 @@ module.exports = fp(async (fastify, options) => {
     if (task.status !== 'waiting') {
       throw new Error('当前任务状态不允许执行Next操作');
     }
-    if (task.context?.secret) {
-      const dataToSign = `${id}|${resultStr}`;
-      // 使用 HMAC-SHA256 生成签名
-      const hmac = crypto.createHmac('sha256', task.context.secret);
-      hmac.update(dataToSign);
-      if (signature !== hmac.digest('hex')) {
-        throw new Error('签名验证失败');
-      }
+    if (task.context?.secret && !verifySignature({ secret: task.context.secret, id, data: resultStr, signature })) {
+      throw new Error('签名验证失败');
     }
     const result = JSON.parse(resultStr);
     if (result.code !== 0) {
       await task.update({
-        status: 'failed', error: result, completedAt: new Date()
+        status: 'failed',
+        error: result,
+        completedAt: new Date()
       });
       return;
     }
     await options.task[task.type]({ task, result: result.data, context: task.context });
     await task.update({
-      status: 'success', output: result, progress: 100, completedAt: new Date()
+      status: 'success',
+      output: result,
+      progress: 100,
+      completedAt: new Date()
     });
   };
 
@@ -143,7 +160,7 @@ module.exports = fp(async (fastify, options) => {
         completedAt: null,
         context: {}
       });
-      const addLog = (props) => {
+      const addLog = props => {
         return log(Object.assign({}, props, { taskId: task.id }));
       };
       executor({ type: task.type, scriptName: task.scriptName, task, log: addLog })
@@ -153,17 +170,24 @@ module.exports = fp(async (fastify, options) => {
           }
           await options.task[task.type]({ task, result, context: task.context });
           await task.update({
-            status: 'success', output: result, progress: 100, completedAt: new Date()
+            status: 'success',
+            output: result,
+            progress: 100,
+            completedAt: new Date()
           });
         })
         .catch(e => {
           return task.update({
-            status: 'failed', error: (e.stack || '').replaceAll(process.cwd(), '/server'), completedAt: new Date()
+            status: 'failed',
+            error: (e.stack || '').replaceAll(process.cwd(), '/server'),
+            completedAt: new Date()
           });
         });
     } catch (e) {
       await task.update({
-        status: 'failed', error: (e.stack || '').replaceAll(process.cwd(), '/server'), completedAt: new Date()
+        status: 'failed',
+        error: (e.stack || '').replaceAll(process.cwd(), '/server'),
+        completedAt: new Date()
       });
     }
   };
@@ -171,7 +195,8 @@ module.exports = fp(async (fastify, options) => {
   const runner = async () => {
     const runningTaskCount = await models.task.count({
       where: {
-        runnerType: 'system', status: 'running'
+        runnerType: 'system',
+        status: 'running'
       }
     });
     const limit = options.limit - runningTaskCount;
@@ -181,15 +206,19 @@ module.exports = fp(async (fastify, options) => {
     }
     const pendingTasks = await models.task.findAll({
       where: {
-        runnerType: 'system', status: 'pending', startTime: {
+        runnerType: 'system',
+        status: 'pending',
+        startTime: {
           [Op.lte]: new Date()
         }
-      }, limit: options.limit
+      },
+      limit: options.limit
     });
 
     const count = await models.task.count({
       where: {
-        runnerType: 'system', status: 'pending'
+        runnerType: 'system',
+        status: 'pending'
       }
     });
 
@@ -209,15 +238,21 @@ module.exports = fp(async (fastify, options) => {
 
   const cancel = async ({ id, targetId, targetType, type }) => {
     if (targetId && targetType && type) {
-      return await models.task.update({
-        status: 'canceled'
-      }, {
-        where: {
-          targetId, targetType, type, status: {
-            [Op.in]: ['pending', 'running']
+      return await models.task.update(
+        {
+          status: 'canceled'
+        },
+        {
+          where: {
+            targetId,
+            targetType,
+            type,
+            status: {
+              [Op.in]: ['pending', 'running']
+            }
           }
         }
-      });
+      );
     }
     if (id) {
       const task = await detail({ id });
@@ -239,18 +274,31 @@ module.exports = fp(async (fastify, options) => {
       try {
         await options.task[task.type]({ task, result: output });
         await task.update({
-          status: 'success', output, progress: 100, completedAt: new Date(), completedUserId: userId
+          status: 'success',
+          output,
+          progress: 100,
+          completedAt: new Date(),
+          completedUserId: userId
         });
       } catch (e) {
-        await task.update(Object.assign({}, props, {
-          status: 'failed', output, error: (e.stack || '').replaceAll(process.cwd(), '/server'), completedAt: new Date()
-        }));
+        await task.update(
+          Object.assign({}, props, {
+            status: 'failed',
+            output,
+            error: (e.stack || '').replaceAll(process.cwd(), '/server'),
+            completedAt: new Date()
+          })
+        );
         throw e;
       }
     } else {
-      await task.update(Object.assign({}, props, {
-        status: 'failed', completedAt: new Date(), completedUserId: userId
-      }));
+      await task.update(
+        Object.assign({}, props, {
+          status: 'failed',
+          completedAt: new Date(),
+          completedUserId: userId
+        })
+      );
     }
   };
 
@@ -363,7 +411,8 @@ module.exports = fp(async (fastify, options) => {
     });
 
     return {
-      pageData: rows, totalCount: count
+      pageData: rows,
+      totalCount: count
     };
   };
 
@@ -373,7 +422,9 @@ module.exports = fp(async (fastify, options) => {
       throw new Error('只有失败或取消的任务允许重试');
     }
     await task.update({
-      status: 'pending', completedAt: null, completedUserId: null
+      status: 'pending',
+      completedAt: null,
+      completedUserId: null
     });
   };
 
@@ -388,36 +439,66 @@ module.exports = fp(async (fastify, options) => {
     }
   };
 
-  const log = async ({ taskId, data, message = '' }) => {
-    const task = await detail({ id: taskId });
+  const log = async ({ id, taskId, data, message = '', signature }) => {
+    const targetId = id || taskId;
+    const task = await detail({ id: targetId });
     if (!task) {
       throw new Error('任务不存在');
+    }
+
+    if (task.context?.secret && !verifySignature({ secret: task.context.secret, id: targetId, data: { data, message }, signature })) {
+      throw new Error('签名验证失败');
     }
 
     const currentOptions = task.options || {};
     const logs = (currentOptions.logs || []).slice(0);
     logs.splice(0, 0, {
-      data, message, time: new Date()
+      data,
+      message,
+      time: new Date()
     });
     if (logs.length > 100) {
       logs.splice(0, logs.length - 100);
     }
     await task.update({
       options: {
-        ...currentOptions, logs
+        ...currentOptions,
+        logs
       }
     });
 
     return task;
   };
 
-  const callback = async (id, result) => {
-    await log({ id, message: '回调结果', data: JSON.stringify(result) });
-    const input = Object.assign({}, { id }, result.code === 0 ? {
-      status: 'success', output: result.data
-    } : {
-      status: 'failed', output: result.data, error: result.message
-    });
+  const callback = async ({ id, code, data, message, signature }) => {
+    const task = await detail({ id });
+    if (!task) {
+      throw new Error('任务不存在');
+    }
+
+    if (task.context?.secret && !verifySignature({ secret: task.context.secret, id, data: { code, data, message }, signature })) {
+      throw new Error('签名验证失败');
+    }
+
+    const result = { code, data, message };
+    const logData = JSON.stringify(result);
+    const logMessage = '回调结果';
+    const logSignature = task.context?.secret ? generateSignature({ secret: task.context.secret, id, data: { data: logData, message: logMessage } }) : undefined;
+    await log({ taskId: id, message: logMessage, data: logData, signature: logSignature });
+    const input = Object.assign(
+      {},
+      { id },
+      code === 0
+        ? {
+            status: 'success',
+            output: data
+          }
+        : {
+            status: 'failed',
+            output: data,
+            error: message
+          }
+    );
     await complete(input);
   };
 
