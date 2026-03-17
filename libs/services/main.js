@@ -395,11 +395,13 @@ module.exports = fp(async (fastify, options) => {
     }
 
     const currentOptions = task.options || {};
-    const logs = currentOptions.logs || [];
-    logs.push({
+    const logs = (currentOptions.logs || []).slice(0);
+    logs.splice(0, 0, {
       data, message, time: new Date()
     });
-
+    if (logs.length > 100) {
+      logs.splice(0, logs.length - 100);
+    }
     await task.update({
       options: {
         ...currentOptions, logs
@@ -407,6 +409,16 @@ module.exports = fp(async (fastify, options) => {
     });
 
     return task;
+  };
+
+  const callback = async (id, result) => {
+    await log({ id, message: '回调结果', data: JSON.stringify(result) });
+    const input = Object.assign({}, { id }, result.code === 0 ? {
+      status: 'success', output: result.data
+    } : {
+      status: 'failed', output: result.data, error: result.message
+    });
+    await complete(input);
   };
 
   Object.assign(fastify[options.name].services, {
@@ -419,6 +431,7 @@ module.exports = fp(async (fastify, options) => {
     resetAll,
     retry,
     log,
+    callback,
     executor,
     processNext,
     processSystemTask,
