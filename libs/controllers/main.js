@@ -228,7 +228,7 @@ module.exports = fp(async (fastify, options) => {
       }
     },
     async request => {
-      return await services.log(Object.assign({}, request.body, { taskId: request.query.taskId }));
+      return await services.logWithSignature(Object.assign({}, request.body, { taskId: request.query.taskId }));
     }
   );
 
@@ -269,7 +269,7 @@ module.exports = fp(async (fastify, options) => {
       }
     },
     async request => {
-      return await services.callback(Object.assign({}, request.body, { taskId: request.query.taskId }));
+      return await services.callbackWithSignature(Object.assign({}, request.body, { taskId: request.query.taskId }));
     }
   );
 });

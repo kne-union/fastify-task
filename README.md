@@ -41,6 +41,55 @@ npm i --save @kne/fastify-task
 | failed   | 执行失败   |
 | canceled | 已取消    |
 
+### 签名验证
+
+当任务的 `context.secret` 设置了密钥时，外部调用需要提供 HMAC-SHA256 签名进行验证。
+
+#### 签名生成方法
+
+```javascript
+const crypto = require('node:crypto');
+
+function generateSignature({ secret, id, data }) {
+  // data 可以是字符串或对象
+  const dataStr = typeof data === 'string' ? data : JSON.stringify(data);
+  const dataToSign = `${id}|${dataStr}`;
+  const hmac = crypto.createHmac('sha256', secret);
+  hmac.update(dataToSign);
+  return hmac.digest('hex');
+}
+```
+
+#### 各接口签名数据格式
+
+| 接口                 | data 格式                        |
+|----------------------|----------------------------------|
+| processNext          | `result` 字符串（JSON格式结果）   |
+| logWithSignature     | `{ data, message }` 对象         |
+| callbackWithSignature| `{ code, data, message }` 对象   |
+
+#### 示例
+
+```javascript
+// processNext 签名
+const result = JSON.stringify({ code: 0, data: { output: 'done' } });
+const signature = generateSignature({ secret: 'your-secret', id: 'task-1', data: result });
+
+// logWithSignature 签名
+const signature = generateSignature({
+  secret: 'your-secret',
+  id: 'task-1',
+  data: { data: { key: 'value' }, message: '日志消息' }
+});
+
+// callbackWithSignature 签名
+const signature = generateSignature({
+  secret: 'your-secret',
+  id: 'task-1',
+  data: { code: 0, data: { result: 'done' }, message: '成功' }
+});
+```
+
 ### 示例
 
 ### API
@@ -211,7 +260,20 @@ npm i --save @kne/fastify-task
 | id      | string   | 否  | 单个任务ID |
 | taskIds | string[] | 否  | 任务ID数组 |
 
-#### log - 记录日志
+#### log - 记录日志（内部调用）
+
+> 内部调用方法，不需要签名验证
+
+| 参数名     | 类型     | 必填 | 说明              |
+|-----------|--------|----|-----------------|
+| id        | string | 是  | 任务ID            |
+| taskId    | string | 是  | 任务ID（id的别名）     |
+| data      | object | 否  | 日志数据            |
+| message   | string | 否  | 日志消息            |
+
+#### logWithSignature - 记录日志（外部调用）
+
+> 外部调用方法，需要签名验证（HTTP API使用）
 
 | 参数名       | 类型     | 必填 | 说明                                     |
 |-----------|--------|----|----------------------------------------|
@@ -221,7 +283,20 @@ npm i --save @kne/fastify-task
 | message   | string | 否  | 日志消息                                   |
 | signature | string | 否  | HMAC-SHA256签名（当任务设置了context.secret时必填） |
 
-#### callback - 任务回调
+#### callback - 任务回调（内部调用）
+
+> 内部调用方法，不需要签名验证
+
+| 参数名     | 类型     | 必填 | 说明        |
+|-----------|--------|----|-----------|
+| id        | string | 是  | 任务ID      |
+| code      | number | 是  | 状态码，0为成功  |
+| data      | object | 否  | 回调数据      |
+| message   | string | 否  | 回调消息      |
+
+#### callbackWithSignature - 任务回调（外部调用）
+
+> 外部调用方法，需要签名验证（HTTP API使用）
 
 | 参数名       | 类型     | 必填 | 说明                                     |
 |-----------|--------|----|----------------------------------------|

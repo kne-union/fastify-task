@@ -26,3 +26,52 @@
 | success  | 执行成功   |
 | failed   | 执行失败   |
 | canceled | 已取消    |
+
+### 签名验证
+
+当任务的 `context.secret` 设置了密钥时，外部调用需要提供 HMAC-SHA256 签名进行验证。
+
+#### 签名生成方法
+
+```javascript
+const crypto = require('node:crypto');
+
+function generateSignature({ secret, id, data }) {
+  // data 可以是字符串或对象
+  const dataStr = typeof data === 'string' ? data : JSON.stringify(data);
+  const dataToSign = `${id}|${dataStr}`;
+  const hmac = crypto.createHmac('sha256', secret);
+  hmac.update(dataToSign);
+  return hmac.digest('hex');
+}
+```
+
+#### 各接口签名数据格式
+
+| 接口                 | data 格式                        |
+|----------------------|----------------------------------|
+| processNext          | `result` 字符串（JSON格式结果）   |
+| logWithSignature     | `{ data, message }` 对象         |
+| callbackWithSignature| `{ code, data, message }` 对象   |
+
+#### 示例
+
+```javascript
+// processNext 签名
+const result = JSON.stringify({ code: 0, data: { output: 'done' } });
+const signature = generateSignature({ secret: 'your-secret', id: 'task-1', data: result });
+
+// logWithSignature 签名
+const signature = generateSignature({
+  secret: 'your-secret',
+  id: 'task-1',
+  data: { data: { key: 'value' }, message: '日志消息' }
+});
+
+// callbackWithSignature 签名
+const signature = generateSignature({
+  secret: 'your-secret',
+  id: 'task-1',
+  data: { code: 0, data: { result: 'done' }, message: '成功' }
+});
+```

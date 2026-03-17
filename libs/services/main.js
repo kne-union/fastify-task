@@ -439,15 +439,11 @@ module.exports = fp(async (fastify, options) => {
     }
   };
 
-  const log = async ({ id, taskId, data, message = '', signature }) => {
+  const log = async ({ id, taskId, data, message = '' }) => {
     const targetId = id || taskId;
     const task = await detail({ id: targetId });
     if (!task) {
       throw new Error('任务不存在');
-    }
-
-    if (task.context?.secret && !verifySignature({ secret: task.context.secret, id: targetId, data: { data, message }, signature })) {
-      throw new Error('签名验证失败');
     }
 
     const currentOptions = task.options || {};
@@ -470,21 +466,28 @@ module.exports = fp(async (fastify, options) => {
     return task;
   };
 
-  const callback = async ({ id, code, data, message, signature }) => {
+  const logWithSignature = async ({ id, taskId, data, message = '', signature }) => {
+    const targetId = id || taskId;
+    const task = await detail({ id: targetId });
+    if (!task) {
+      throw new Error('任务不存在');
+    }
+
+    if (task.context?.secret && !verifySignature({ secret: task.context.secret, id: targetId, data: { data, message }, signature })) {
+      throw new Error('签名验证失败');
+    }
+
+    return log({ id: targetId, data, message });
+  };
+
+  const callback = async ({ id, code, data, message }) => {
     const task = await detail({ id });
     if (!task) {
       throw new Error('任务不存在');
     }
 
-    if (task.context?.secret && !verifySignature({ secret: task.context.secret, id, data: { code, data, message }, signature })) {
-      throw new Error('签名验证失败');
-    }
-
     const result = { code, data, message };
-    const logData = JSON.stringify(result);
-    const logMessage = '回调结果';
-    const logSignature = task.context?.secret ? generateSignature({ secret: task.context.secret, id, data: { data: logData, message: logMessage } }) : undefined;
-    await log({ taskId: id, message: logMessage, data: logData, signature: logSignature });
+    await log({ id, message: '回调结果', data: JSON.stringify(result) });
     const input = Object.assign(
       {},
       { id },
@@ -502,6 +505,19 @@ module.exports = fp(async (fastify, options) => {
     await complete(input);
   };
 
+  const callbackWithSignature = async ({ id, code, data, message, signature }) => {
+    const task = await detail({ id });
+    if (!task) {
+      throw new Error('任务不存在');
+    }
+
+    if (task.context?.secret && !verifySignature({ secret: task.context.secret, id, data: { code, data, message }, signature })) {
+      throw new Error('签名验证失败');
+    }
+
+    return callback({ id, code, data, message });
+  };
+
   Object.assign(fastify[options.name].services, {
     create,
     detail,
@@ -512,7 +528,9 @@ module.exports = fp(async (fastify, options) => {
     resetAll,
     retry,
     log,
+    logWithSignature,
     callback,
+    callbackWithSignature,
     executor,
     processNext,
     processSystemTask,
