@@ -2,178 +2,274 @@ const fp = require('fastify-plugin');
 
 module.exports = fp(async (fastify, options) => {
   const { services } = fastify[options.name];
-  fastify.get(`${options.prefix}/list`, {
-    onRequest: options.getAuthenticate('read'), schema: {
-      summary: '获取任务列表', query: {
-        type: 'object', properties: {
-          perPage: {
-            type: 'number', default: 20
-          }, currentPage: {
-            type: 'number', default: 1
-          }, filter: {
-            type: 'object', properties: {
-              id: {
-                type: 'string'
-              }, targetId: {
-                type: 'string'
-              }, targetName: {
-                type: 'string'
-              }, type: {
-                type: 'string'
-              }, status: {
-                type: 'string'
-              }, runnerType: {
-                type: 'string'
-              }, createdAt: {
-                type: 'object', properties: {
-                  startTime: {
-                    type: 'string'
-                  }, endTime: {
-                    type: 'string'
-                  }
-                }, description: 'createdAt区间查找'
-              }, completedAt: {
-                type: 'object', properties: {
-                  startTime: {
-                    type: 'string'
-                  }, endTime: {
-                    type: 'string'
-                  }
-                }, description: 'completedAt区间查找'
+  fastify.get(
+    `${options.prefix}/list`,
+    {
+      onRequest: options.getAuthenticate('read'),
+      schema: {
+        summary: '获取任务列表',
+        query: {
+          type: 'object',
+          properties: {
+            perPage: {
+              type: 'number',
+              default: 20
+            },
+            currentPage: {
+              type: 'number',
+              default: 1
+            },
+            filter: {
+              type: 'object',
+              properties: {
+                id: {
+                  type: 'string'
+                },
+                targetId: {
+                  type: 'string'
+                },
+                targetName: {
+                  type: 'string'
+                },
+                type: {
+                  type: 'string'
+                },
+                status: {
+                  type: 'string'
+                },
+                runnerType: {
+                  type: 'string'
+                },
+                createdAt: {
+                  type: 'object',
+                  properties: {
+                    startTime: {
+                      type: 'string'
+                    },
+                    endTime: {
+                      type: 'string'
+                    }
+                  },
+                  description: 'createdAt区间查找'
+                },
+                completedAt: {
+                  type: 'object',
+                  properties: {
+                    startTime: {
+                      type: 'string'
+                    },
+                    endTime: {
+                      type: 'string'
+                    }
+                  },
+                  description: 'completedAt区间查找'
+                }
               }
+            },
+            sort: {
+              type: 'object',
+              description: '按completedAt、updatedAt字段排序，ASC为升序，DESC为降序'
             }
-          }, sort: {
-            type: 'object', description: '按completedAt、updatedAt字段排序，ASC为升序，DESC为降序'
           }
         }
       }
+    },
+    async request => {
+      return services.list(request.query);
     }
-  }, async request => {
-    return services.list(request.query);
-  });
+  );
 
-  fastify.post(`${options.prefix}/complete`, {
-    onRequest: options.getAuthenticate('write'), schema: {
-      summary: '手动完成任务', body: {
-        type: 'object', properties: {
-          id: {
-            type: 'string'
-          }, status: {
-            type: 'string', enum: ['success', 'failed']
-          }, error: {
-            type: 'string'
-          }, msg: {
-            type: 'string'
-          }, output: {
-            type: 'object'
-          }
-        }, required: ['id', 'status']
-      }
-    }
-  }, async request => {
-    await services.complete(Object.assign({}, request.body, { userId: request.userInfo?.id }));
-    return {};
-  });
-
-  fastify.post(`${options.prefix}/cancel`, {
-    onRequest: options.getAuthenticate('write'), schema: {
-      summary: '取消任务', body: {
-        type: 'object', properties: {
-          id: {
-            type: 'string'
-          }
+  fastify.post(
+    `${options.prefix}/complete`,
+    {
+      onRequest: options.getAuthenticate('write'),
+      schema: {
+        summary: '手动完成任务',
+        body: {
+          type: 'object',
+          properties: {
+            id: {
+              type: 'string'
+            },
+            status: {
+              type: 'string',
+              enum: ['success', 'failed']
+            },
+            error: {
+              type: 'string'
+            },
+            msg: {
+              type: 'string'
+            },
+            output: {
+              type: 'object'
+            }
+          },
+          required: ['id', 'status']
         }
       }
+    },
+    async request => {
+      await services.complete(Object.assign({}, request.body, { userId: request.userInfo?.id }));
+      return {};
     }
-  }, async request => {
-    await services.cancel(request.body);
-    return {};
-  });
+  );
 
-  fastify.post(`${options.prefix}/retry`, {
-    onRequest: options.getAuthenticate('write'), schema: {
-      summary: '重试任务', body: {
-        type: 'object', properties: {
-          id: {
-            type: 'string'
-          }, taskIds: {
-            type: 'array', items: {
+  fastify.post(
+    `${options.prefix}/cancel`,
+    {
+      onRequest: options.getAuthenticate('write'),
+      schema: {
+        summary: '取消任务',
+        body: {
+          type: 'object',
+          properties: {
+            id: {
               type: 'string'
             }
           }
         }
       }
+    },
+    async request => {
+      await services.cancel(request.body);
+      return {};
     }
-  }, async request => {
-    await services.retry(request.body);
-    return {};
-  });
+  );
 
-  fastify.post(`${options.prefix}/next`, {
-    schema: {
-      summary: '处理任务next', body: {
-        type: 'object', properties: {
-          id: {
-            type: 'string', description: '任务ID'
-          }, signature: {
-            type: 'string', description: '签名'
-          }, result: {
-            type: 'string', description: '结果'
+  fastify.post(
+    `${options.prefix}/retry`,
+    {
+      onRequest: options.getAuthenticate('write'),
+      schema: {
+        summary: '重试任务',
+        body: {
+          type: 'object',
+          properties: {
+            id: {
+              type: 'string'
+            },
+            taskIds: {
+              type: 'array',
+              items: {
+                type: 'string'
+              }
+            }
           }
         }
       }
+    },
+    async request => {
+      await services.retry(request.body);
+      return {};
     }
-  }, async request => {
-    return await services.processNext(request.body);
-  });
+  );
 
-  fastify.post(`${options.prefix}/log`, {
-    schema: {
-      summary: '记录任务日志', body: {
-        type: 'object', properties: {
-          id: {
-            type: 'string'
-          }, data: {
-            type: 'object'
-          }, message: {
-            type: 'string'
-          }
-        }
-      }, query: {
-        type: 'object', properties: {
-          taskId: {
-            type: 'string'
+  fastify.post(
+    `${options.prefix}/next`,
+    {
+      schema: {
+        summary: '处理任务next',
+        body: {
+          type: 'object',
+          properties: {
+            id: {
+              type: 'string',
+              description: '任务ID'
+            },
+            signature: {
+              type: 'string',
+              description: '签名'
+            },
+            result: {
+              type: 'string',
+              description: '结果'
+            }
           }
         }
       }
+    },
+    async request => {
+      return await services.processNext(request.body);
     }
-  }, async (request) => {
-    return await services.log(Object.assign({}, request.body, { taskId: request.query.taskId }));
-  });
+  );
 
-  fastify.post(`${options.prefix}/callback`, {
-    schema: {
-      summary: '任务回调', body: {
-        type: 'object', properties: {
-          id: {
-            type: 'string'
-          }, code: {
-            type: 'number'
-          }, data: {
-            type: 'object'
-          }, message: {
-            type: 'string'
+  fastify.post(
+    `${options.prefix}/log`,
+    {
+      schema: {
+        summary: '记录任务日志',
+        body: {
+          type: 'object',
+          properties: {
+            id: {
+              type: 'string'
+            },
+            data: {
+              type: 'object'
+            },
+            message: {
+              type: 'string'
+            },
+            signature: {
+              type: 'string',
+              description: 'HMAC-SHA256签名'
+            }
           }
-        }
-      }, query: {
-        type: 'object', properties: {
-          taskId: {
-            type: 'string'
+        },
+        query: {
+          type: 'object',
+          properties: {
+            taskId: {
+              type: 'string'
+            }
           }
         }
       }
+    },
+    async request => {
+      return await services.log(Object.assign({}, request.body, { taskId: request.query.taskId }));
     }
-  }, async (request) => {
-    return await services.callback(Object.assign({}, request.body, { taskId: request.query.taskId }));
-  });
+  );
+
+  fastify.post(
+    `${options.prefix}/callback`,
+    {
+      schema: {
+        summary: '任务回调',
+        body: {
+          type: 'object',
+          properties: {
+            id: {
+              type: 'string'
+            },
+            code: {
+              type: 'number'
+            },
+            data: {
+              type: 'object'
+            },
+            message: {
+              type: 'string'
+            },
+            signature: {
+              type: 'string',
+              description: 'HMAC-SHA256签名'
+            }
+          }
+        },
+        query: {
+          type: 'object',
+          properties: {
+            taskId: {
+              type: 'string'
+            }
+          }
+        }
+      }
+    },
+    async request => {
+      return await services.callback(Object.assign({}, request.body, { taskId: request.query.taskId }));
+    }
+  );
 });

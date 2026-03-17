@@ -77,34 +77,36 @@
 
 **POST** `{prefix}/next`
 
-| 参数名       | 类型     | 必填 | 说明            |
-|-----------|--------|----|---------------|
-| id        | string | 是  | 任务ID          |
-| signature | string | 否  | HMAC-SHA256签名 |
-| result    | string | 是  | JSON格式的结果     |
+| 参数名       | 类型     | 必填 | 说明                                     |
+|-----------|--------|----|----------------------------------------|
+| id        | string | 是  | 任务ID                                   |
+| signature | string | 否  | HMAC-SHA256签名（当任务设置了context.secret时必填） |
+| result    | string | 是  | JSON格式的结果                              |
 
 #### 记录任务日志
 
 **POST** `{prefix}/log`
 
-| 参数名     | 类型     | 必填 | 说明          |
-|---------|--------|----|-------------|
-| id      | string | 是  | 任务ID（body）  |
-| taskId  | string | 是  | 任务ID（query） |
-| data    | object | 否  | 日志数据        |
-| message | string | 否  | 日志消息        |
+| 参数名       | 类型     | 必填 | 说明                                     |
+|-----------|--------|----|----------------------------------------|
+| id        | string | 是  | 任务ID（body）                             |
+| taskId    | string | 是  | 任务ID（query）                            |
+| data      | object | 否  | 日志数据                                   |
+| message   | string | 否  | 日志消息                                   |
+| signature | string | 否  | HMAC-SHA256签名（当任务设置了context.secret时必填） |
 
 #### 任务回调
 
 **POST** `{prefix}/callback`
 
-| 参数名     | 类型     | 必填 | 说明          |
-|---------|--------|----|-------------|
-| id      | string | 是  | 任务ID（body）  |
-| taskId  | string | 是  | 任务ID（query） |
-| code    | number | 是  | 状态码，0为成功    |
-| data    | object | 否  | 回调数据        |
-| message | string | 否  | 回调消息        |
+| 参数名       | 类型     | 必填 | 说明                                     |
+|-----------|--------|----|----------------------------------------|
+| id        | string | 是  | 任务ID（body）                             |
+| taskId    | string | 是  | 任务ID（query）                            |
+| code      | number | 是  | 状态码，0为成功                               |
+| data      | object | 否  | 回调数据                                   |
+| message   | string | 否  | 回调消息                                   |
+| signature | string | 否  | HMAC-SHA256签名（当任务设置了context.secret时必填） |
 
 ### 服务层 API
 
@@ -164,11 +166,23 @@
 
 #### log - 记录日志
 
-| 参数名     | 类型     | 必填 | 说明   |
-|---------|--------|----|------|
-| taskId  | string | 是  | 任务ID |
-| data    | object | 否  | 日志数据 |
-| message | string | 否  | 日志消息 |
+| 参数名       | 类型     | 必填 | 说明                                     |
+|-----------|--------|----|----------------------------------------|
+| id        | string | 是  | 任务ID                                   |
+| taskId    | string | 是  | 任务ID（id的别名）                            |
+| data      | object | 否  | 日志数据                                   |
+| message   | string | 否  | 日志消息                                   |
+| signature | string | 否  | HMAC-SHA256签名（当任务设置了context.secret时必填） |
+
+#### callback - 任务回调
+
+| 参数名       | 类型     | 必填 | 说明                                     |
+|-----------|--------|----|----------------------------------------|
+| id        | string | 是  | 任务ID                                   |
+| code      | number | 是  | 状态码，0为成功                               |
+| data      | object | 否  | 回调数据                                   |
+| message   | string | 否  | 回调消息                                   |
+| signature | string | 否  | HMAC-SHA256签名（当任务设置了context.secret时必填） |
 
 #### runner - 执行系统任务
 

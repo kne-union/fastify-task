@@ -1,6 +1,7 @@
 const { expect } = require('chai');
 const sinon = require('sinon');
 const path = require('node:path');
+const crypto = require('node:crypto');
 
 describe('@kne/fastify-task', function () {
   this.timeout(10000);
@@ -631,6 +632,246 @@ describe('@kne/fastify-task', function () {
 
       expect(task).to.exist;
       expect(task.input).to.deep.equal({});
+    });
+  });
+
+  describe('签名验证测试 - processNext', () => {
+    it('should pass with valid signature when secret is set', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+
+      const secret = 'test-secret-key';
+      const created = await fastify.task.services.create({
+        type: 'test-type',
+        targetId: 'target-1',
+        targetType: 'document'
+      });
+      await created.update({ status: 'waiting', context: { secret } });
+
+      const resultStr = JSON.stringify({ code: 0, data: { result: 'done' } });
+      const dataToSign = `${created.id}|${resultStr}`;
+      const hmac = crypto.createHmac('sha256', secret);
+      hmac.update(dataToSign);
+      const signature = hmac.digest('hex');
+
+      await fastify.task.services.processNext({
+        id: created.id,
+        signature,
+        result: resultStr
+      });
+
+      const task = await fastify.task.services.detail({ id: created.id });
+      expect(task.status).to.equal('success');
+    });
+
+    it('should fail with invalid signature when secret is set', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+
+      const secret = 'test-secret-key';
+      const created = await fastify.task.services.create({
+        type: 'test-type',
+        targetId: 'target-1',
+        targetType: 'document'
+      });
+      await created.update({ status: 'waiting', context: { secret } });
+
+      const resultStr = JSON.stringify({ code: 0, data: { result: 'done' } });
+
+      try {
+        await fastify.task.services.processNext({
+          id: created.id,
+          signature: 'invalid-signature',
+          result: resultStr
+        });
+        throw new Error('Should have thrown');
+      } catch (e) {
+        expect(e.message).to.equal('签名验证失败');
+      }
+    });
+
+    it('should pass without signature when secret is not set', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+
+      const created = await fastify.task.services.create({
+        type: 'test-type',
+        targetId: 'target-1',
+        targetType: 'document'
+      });
+      await created.update({ status: 'waiting' });
+
+      const resultStr = JSON.stringify({ code: 0, data: { result: 'done' } });
+
+      await fastify.task.services.processNext({
+        id: created.id,
+        result: resultStr
+      });
+
+      const task = await fastify.task.services.detail({ id: created.id });
+      expect(task.status).to.equal('success');
+    });
+  });
+
+  describe('签名验证测试 - log', () => {
+    it('should pass with valid signature when secret is set', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+
+      const secret = 'test-secret-key';
+      const created = await fastify.task.services.create({
+        type: 'test-type',
+        targetId: 'target-1',
+        targetType: 'document'
+      });
+      await created.update({ context: { secret } });
+
+      const data = { key: 'value' };
+      const message = 'Test log';
+      const dataStr = JSON.stringify({ data, message });
+      const dataToSign = `${created.id}|${dataStr}`;
+      const hmac = crypto.createHmac('sha256', secret);
+      hmac.update(dataToSign);
+      const signature = hmac.digest('hex');
+
+      await fastify.task.services.log({
+        id: created.id,
+        data,
+        message,
+        signature
+      });
+
+      const task = await fastify.task.services.detail({ id: created.id });
+      expect(task.options.logs).to.exist;
+      expect(task.options.logs[0].message).to.equal('Test log');
+    });
+
+    it('should fail with invalid signature when secret is set', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+
+      const secret = 'test-secret-key';
+      const created = await fastify.task.services.create({
+        type: 'test-type',
+        targetId: 'target-1',
+        targetType: 'document'
+      });
+      await created.update({ context: { secret } });
+
+      try {
+        await fastify.task.services.log({
+          id: created.id,
+          data: { key: 'value' },
+          message: 'Test log',
+          signature: 'invalid-signature'
+        });
+        throw new Error('Should have thrown');
+      } catch (e) {
+        expect(e.message).to.equal('签名验证失败');
+      }
+    });
+
+    it('should pass without signature when secret is not set', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+
+      const created = await fastify.task.services.create({
+        type: 'test-type',
+        targetId: 'target-1',
+        targetType: 'document'
+      });
+
+      await fastify.task.services.log({
+        id: created.id,
+        data: { key: 'value' },
+        message: 'Test log'
+      });
+
+      const task = await fastify.task.services.detail({ id: created.id });
+      expect(task.options.logs).to.exist;
+      expect(task.options.logs[0].message).to.equal('Test log');
+    });
+  });
+
+  describe('签名验证测试 - callback', () => {
+    it('should pass with valid signature when secret is set', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+
+      const secret = 'test-secret-key';
+      const created = await fastify.task.services.create({
+        type: 'test-type',
+        targetId: 'target-1',
+        targetType: 'document'
+      });
+      await created.update({ context: { secret } });
+
+      const code = 0;
+      const data = { result: 'done' };
+      const message = 'Success';
+      const resultStr = JSON.stringify({ code, data, message });
+      const dataToSign = `${created.id}|${resultStr}`;
+      const hmac = crypto.createHmac('sha256', secret);
+      hmac.update(dataToSign);
+      const signature = hmac.digest('hex');
+
+      await fastify.task.services.callback({
+        id: created.id,
+        code,
+        data,
+        message,
+        signature
+      });
+
+      const task = await fastify.task.services.detail({ id: created.id });
+      expect(task.status).to.equal('success');
+    });
+
+    it('should fail with invalid signature when secret is set', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+
+      const secret = 'test-secret-key';
+      const created = await fastify.task.services.create({
+        type: 'test-type',
+        targetId: 'target-1',
+        targetType: 'document'
+      });
+      await created.update({ context: { secret } });
+
+      try {
+        await fastify.task.services.callback({
+          id: created.id,
+          code: 0,
+          data: { result: 'done' },
+          message: 'Success',
+          signature: 'invalid-signature'
+        });
+        throw new Error('Should have thrown');
+      } catch (e) {
+        expect(e.message).to.equal('签名验证失败');
+      }
+    });
+
+    it('should pass without signature when secret is not set', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+
+      const created = await fastify.task.services.create({
+        type: 'test-type',
+        targetId: 'target-1',
+        targetType: 'document'
+      });
+
+      await fastify.task.services.callback({
+        id: created.id,
+        code: 0,
+        data: { result: 'done' },
+        message: 'Success'
+      });
+
+      const task = await fastify.task.services.detail({ id: created.id });
+      expect(task.status).to.equal('success');
     });
   });
 });
