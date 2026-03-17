@@ -713,7 +713,7 @@ describe('@kne/fastify-task', function () {
     });
   });
 
-  describe('签名验证测试 - log', () => {
+  describe('签名验证测试 - logWithSignature', () => {
     it('should pass with valid signature when secret is set', async () => {
       fastify = await createFastify();
       await fastify.ready();
@@ -734,7 +734,7 @@ describe('@kne/fastify-task', function () {
       hmac.update(dataToSign);
       const signature = hmac.digest('hex');
 
-      await fastify.task.services.log({
+      await fastify.task.services.logWithSignature({
         id: created.id,
         data,
         message,
@@ -759,7 +759,7 @@ describe('@kne/fastify-task', function () {
       await created.update({ context: { secret } });
 
       try {
-        await fastify.task.services.log({
+        await fastify.task.services.logWithSignature({
           id: created.id,
           data: { key: 'value' },
           message: 'Test log',
@@ -781,7 +781,7 @@ describe('@kne/fastify-task', function () {
         targetType: 'document'
       });
 
-      await fastify.task.services.log({
+      await fastify.task.services.logWithSignature({
         id: created.id,
         data: { key: 'value' },
         message: 'Test log'
@@ -793,7 +793,7 @@ describe('@kne/fastify-task', function () {
     });
   });
 
-  describe('签名验证测试 - callback', () => {
+  describe('签名验证测试 - callbackWithSignature', () => {
     it('should pass with valid signature when secret is set', async () => {
       fastify = await createFastify();
       await fastify.ready();
@@ -815,7 +815,7 @@ describe('@kne/fastify-task', function () {
       hmac.update(dataToSign);
       const signature = hmac.digest('hex');
 
-      await fastify.task.services.callback({
+      await fastify.task.services.callbackWithSignature({
         id: created.id,
         code,
         data,
@@ -840,7 +840,7 @@ describe('@kne/fastify-task', function () {
       await created.update({ context: { secret } });
 
       try {
-        await fastify.task.services.callback({
+        await fastify.task.services.callbackWithSignature({
           id: created.id,
           code: 0,
           data: { result: 'done' },
@@ -862,6 +862,54 @@ describe('@kne/fastify-task', function () {
         targetId: 'target-1',
         targetType: 'document'
       });
+
+      await fastify.task.services.callbackWithSignature({
+        id: created.id,
+        code: 0,
+        data: { result: 'done' },
+        message: 'Success'
+      });
+
+      const task = await fastify.task.services.detail({ id: created.id });
+      expect(task.status).to.equal('success');
+    });
+  });
+
+  describe('内部调用测试 - log/callback', () => {
+    it('log should work without signature even when secret is set', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+
+      const secret = 'test-secret-key';
+      const created = await fastify.task.services.create({
+        type: 'test-type',
+        targetId: 'target-1',
+        targetType: 'document'
+      });
+      await created.update({ context: { secret } });
+
+      await fastify.task.services.log({
+        id: created.id,
+        data: { key: 'value' },
+        message: 'Test log'
+      });
+
+      const task = await fastify.task.services.detail({ id: created.id });
+      expect(task.options.logs).to.exist;
+      expect(task.options.logs[0].message).to.equal('Test log');
+    });
+
+    it('callback should work without signature even when secret is set', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+
+      const secret = 'test-secret-key';
+      const created = await fastify.task.services.create({
+        type: 'test-type',
+        targetId: 'target-1',
+        targetType: 'document'
+      });
+      await created.update({ context: { secret } });
 
       await fastify.task.services.callback({
         id: created.id,
