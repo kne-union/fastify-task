@@ -1591,6 +1591,7 @@ describe('@kne/fastify-task', function () {
       expect(result.byStatus).to.exist;
       expect(result.byType).to.exist;
       expect(result.byRunnerType).to.exist;
+      expect(result.runnerTypeStats).to.exist;
       expect(result.hourlyTrend).to.exist;
       expect(result.hourlyTrendByStatus).to.exist;
       expect(result.intervalTrend).to.exist;
@@ -1793,6 +1794,51 @@ describe('@kne/fastify-task', function () {
       expect(result.byRunnerType.manual).to.equal(1);
       expect(result.byRunnerType.system).to.equal(undefined);
       expect(result.byStatus.success).to.equal(1);
+      expect(result.runnerTypeStats.manual).to.deep.equal({ total: 1, pending: 0, executed: 1 });
+    });
+
+    it('should return runnerTypeStats with pending and executed counts per runnerType', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+
+      const now = new Date();
+      await fastify.task.models.task.create({
+        type: 'import',
+        status: 'pending',
+        runnerType: 'manual',
+        targetId: 'rts-1',
+        targetType: 'doc',
+        createdAt: now
+      });
+      await fastify.task.models.task.create({
+        type: 'import',
+        status: 'success',
+        runnerType: 'manual',
+        targetId: 'rts-2',
+        targetType: 'doc',
+        createdAt: now
+      });
+      await fastify.task.models.task.create({
+        type: 'import',
+        status: 'running',
+        runnerType: 'manual',
+        targetId: 'rts-3',
+        targetType: 'doc',
+        createdAt: now
+      });
+      await fastify.task.models.task.create({
+        type: 'sync',
+        status: 'pending',
+        runnerType: 'system',
+        targetId: 'rts-4',
+        targetType: 'doc',
+        createdAt: now
+      });
+
+      const result = await fastify.task.services.statistics.getRealtime({});
+
+      expect(result.runnerTypeStats.manual).to.deep.equal({ total: 3, pending: 1, executed: 2 });
+      expect(result.runnerTypeStats.system).to.deep.equal({ total: 1, pending: 1, executed: 0 });
     });
 
     it('should format realtime date with timezone parameter', async () => {
