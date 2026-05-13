@@ -51,6 +51,9 @@ describe('@kne/fastify-task', function () {
       const list = condition[Op.in] || [];
       return list.includes(fieldValue);
     }
+    if (Object.prototype.hasOwnProperty.call(condition, Op.ne)) {
+      return fieldValue !== condition[Op.ne];
+    }
     if (Object.prototype.hasOwnProperty.call(condition, Op.like)) {
       const pattern = String(condition[Op.like] || '');
       const normalized = pattern.replaceAll('%', '');
@@ -1608,11 +1611,40 @@ describe('@kne/fastify-task', function () {
       expect(result.todayDuration.byRunnerType).to.deep.equal({});
     });
 
+    it('should fall back to today task aggregates when daily statistics are missing', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+
+      const now = new Date();
+      const created = new Date(now.getTime() - 15000);
+      const started = new Date(now.getTime() - 10000);
+
+      await fastify.task.models.task.create({
+        type: 'import',
+        status: 'success',
+        runnerType: 'manual',
+        targetId: 'dur-fb-1',
+        targetType: 'doc',
+        createdAt: created,
+        startedAt: started,
+        completedAt: now
+      });
+
+      const result = await fastify.task.services.statistics.getRealtime({});
+
+      expect(result.todayDuration.completedCount).to.equal(1);
+      expect(result.todayDuration.avgTotalTime).to.be.greaterThan(0);
+      expect(result.todayDuration.byType.import.count).to.equal(1);
+      expect(result.todayDuration.byType.import.avgTotalTime).to.be.greaterThan(0);
+      expect(result.todayDuration.byRunnerType.manual.count).to.equal(1);
+    });
+
     it('should return todayDuration from daily statistics', async () => {
       fastify = await createFastify();
       await fastify.ready();
 
-      const today = new Date().toISOString().split('T')[0];
+      const tmp = await fastify.task.services.statistics.getRealtime({});
+      const today = tmp.date;
       dailyStatsData.push({
         date: today,
         totalCompleted: 10,
