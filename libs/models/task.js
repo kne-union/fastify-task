@@ -29,6 +29,10 @@ module.exports = ({ DataTypes, definePrimaryType, options }) => {
         comment: '任务最早执行时间',
         defaultValue: new Date()
       },
+      startedAt: {
+        type: DataTypes.DATE,
+        comment: '任务实际开始执行时间'
+      },
       completedAt: {
         type: DataTypes.DATE,
         comment: '任务完成时间'
@@ -92,7 +96,16 @@ module.exports = ({ DataTypes, definePrimaryType, options }) => {
       });
     },
     options: {
-      comment: '任务'
+      comment: '任务',
+      indexes: [
+        { fields: ['created_at'] },
+        { fields: ['status'] },
+        { fields: ['type'] },
+        { fields: ['runner_type'] },
+        { fields: ['type', 'status'] },
+        { fields: ['runner_type', 'status'] },
+        { fields: ['target_id', 'target_type', 'type'] }
+      ]
     }
   };
 };
