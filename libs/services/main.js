@@ -925,7 +925,7 @@ module.exports = fp(async (fastify, options) => {
         return Sequelize.literal(`CONCAT(DATE_FORMAT(CONVERT_TZ("${createdAtCol}", '+00:00', '${effectiveTimezone}'), '%H:'), LPAD(FLOOR(EXTRACT(MINUTE FROM CONVERT_TZ("${createdAtCol}", '+00:00', '${effectiveTimezone}')) / 15) * 15, 2, '0'))`);
       })();
 
-      const [totalTasks, byStatus, byType, byRunnerType, hourlyTrend, hourlyTrendByStatus, hourlyTrendByType, intervalTrend] = await Promise.all([
+      const [totalTasks, byStatus, byType, byRunnerType, pendingByRunnerType, nonPendingByRunnerType, hourlyTrend, hourlyTrendByStatus, hourlyTrendByType, intervalTrend] = await Promise.all([
         taskModel.count({ where: whereToday }),
         taskModel.findAll({
           attributes: ['status', [Sequelize.fn('COUNT', Sequelize.col('id')), 'count']],
@@ -942,6 +942,18 @@ module.exports = fp(async (fastify, options) => {
         taskModel.findAll({
           attributes: ['runnerType', [Sequelize.fn('COUNT', Sequelize.col('id')), 'count']],
           where: whereToday,
+          group: ['runnerType'],
+          raw: true
+        }),
+        taskModel.findAll({
+          attributes: ['runnerType', [Sequelize.fn('COUNT', Sequelize.col('id')), 'count']],
+          where: { ...whereToday, status: 'pending' },
+          group: ['runnerType'],
+          raw: true
+        }),
+        taskModel.findAll({
+          attributes: ['runnerType', [Sequelize.fn('COUNT', Sequelize.col('id')), 'count']],
+          where: { ...whereToday, status: { [Sequelize.Op.ne]: 'pending' } },
           group: ['runnerType'],
           raw: true
         }),
@@ -1003,6 +1015,32 @@ module.exports = fp(async (fastify, options) => {
         return utcTime.tz(effectiveTimezone).format('HH:mm');
       };
 
+      const byRunnerTypeMap = byRunnerType.reduce((acc, item) => {
+        acc[item.runnerType] = Number(item.count);
+        return acc;
+      }, {});
+      const pendingByRunnerTypeMap = pendingByRunnerType.reduce((acc, item) => {
+        acc[item.runnerType] = Number(item.count);
+        return acc;
+      }, {});
+      const nonPendingByRunnerTypeMap = nonPendingByRunnerType.reduce((acc, item) => {
+        acc[item.runnerType] = Number(item.count);
+        return acc;
+      }, {});
+      const runnerTypeStatsKeys = new Set([
+        ...Object.keys(byRunnerTypeMap),
+        ...Object.keys(pendingByRunnerTypeMap),
+        ...Object.keys(nonPendingByRunnerTypeMap)
+      ]);
+      const runnerTypeStats = {};
+      for (const k of runnerTypeStatsKeys) {
+        runnerTypeStats[k] = {
+          total: Number(byRunnerTypeMap[k]) || 0,
+          pending: Number(pendingByRunnerTypeMap[k]) || 0,
+          executed: Number(nonPendingByRunnerTypeMap[k]) || 0
+        };
+      }
+
       return {
         date: formatDate(todayStart, effectiveTimezone),
         totalTasks,
@@ -1014,10 +1052,9 @@ module.exports = fp(async (fastify, options) => {
           acc[item.type] = Number(item.count);
           return acc;
         }, {}),
-        byRunnerType: byRunnerType.reduce((acc, item) => {
-          acc[item.runnerType] = Number(item.count);
-          return acc;
-        }, {}),
+        byRunnerType: byRunnerTypeMap,
+        pendingByRunnerType: pendingByRunnerTypeMap,
+        runnerTypeStats,
         hourlyTrend: hourlyTrend.map(item => ({ hour: adjustHour(item.hour), count: Number(item.count) })),
         hourlyTrendByStatus: hourlyTrendByStatus.map(item => ({
           hour: adjustHour(item.hour),
