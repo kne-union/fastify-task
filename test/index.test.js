@@ -15,6 +15,7 @@ describe('@kne/fastify-task', function () {
   let fastify;
   let taskData = [];
   let dailyStatsData = [];
+  let hourlyStatsData = [];
   let taskIdCounter = 1;
 
   const mockUserModel = {
@@ -37,16 +38,16 @@ describe('@kne/fastify-task', function () {
     if (!condition || typeof condition !== 'object' || Array.isArray(condition)) {
       return fieldValue === condition;
     }
-    if (Object.prototype.hasOwnProperty.call(condition, Op.gte)) {
-      return fieldValue >= condition[Op.gte];
-    }
-    if (Object.prototype.hasOwnProperty.call(condition, Op.lte)) {
-      return fieldValue <= condition[Op.lte];
-    }
     if (Object.prototype.hasOwnProperty.call(condition, Op.between)) {
       const [start, end] = condition[Op.between] || [];
       return fieldValue >= start && fieldValue <= end;
     }
+    const rangeChecks = [];
+    if (Object.prototype.hasOwnProperty.call(condition, Op.gte)) rangeChecks.push(fieldValue >= condition[Op.gte]);
+    if (Object.prototype.hasOwnProperty.call(condition, Op.gt)) rangeChecks.push(fieldValue > condition[Op.gt]);
+    if (Object.prototype.hasOwnProperty.call(condition, Op.lte)) rangeChecks.push(fieldValue <= condition[Op.lte]);
+    if (Object.prototype.hasOwnProperty.call(condition, Op.lt)) rangeChecks.push(fieldValue < condition[Op.lt]);
+    if (rangeChecks.length) return rangeChecks.every(Boolean);
     if (Object.prototype.hasOwnProperty.call(condition, Op.in)) {
       const list = condition[Op.in] || [];
       return list.includes(fieldValue);
@@ -63,10 +64,31 @@ describe('@kne/fastify-task', function () {
   };
 
   const matchWhere = (item, where = {}, Op) => {
-    return Object.entries(where).every(([key, condition]) => {
+    if (!where || typeof where !== 'object') return true;
+    const orBranches = Op.or != null ? where[Op.or] : undefined;
+    const rest = { ...where };
+    if (Op.or != null && Object.prototype.hasOwnProperty.call(rest, Op.or)) {
+      delete rest[Op.or];
+    }
+
+    const matchRest = Object.entries(rest).every(([key, condition]) => {
       const fieldValue = getValueByPath(item, key);
       return matchOperatorCondition(fieldValue, condition, Op);
     });
+    if (orBranches == null) return matchRest;
+
+    const branches = Array.isArray(orBranches) ? orBranches : [orBranches];
+    const matchOr = branches.some(branch => {
+      if (branch && typeof branch === 'object' && !Array.isArray(branch)) {
+        return Object.entries(branch).every(([key, condition]) => {
+          const fieldValue = getValueByPath(item, key);
+          return matchOperatorCondition(fieldValue, condition, Op);
+        });
+      }
+      return false;
+    });
+
+    return matchRest && matchOr;
   };
 
   const formatDate = date => {
@@ -89,9 +111,17 @@ describe('@kne/fastify-task', function () {
   const resolveExprValue = (task, expr) => {
     if (typeof expr === 'string') return getValueByPath(task, expr);
     if (expr && typeof expr === 'object' && expr.col) return getValueByPath(task, expr.col);
-    if (expr && typeof expr === 'object' && expr.fn === 'DATE') return formatDate(task.createdAt);
+    if (expr && typeof expr === 'object' && expr.fn === 'DATE') {
+      const a0 = expr.args && expr.args[0];
+      const col = a0 && typeof a0 === 'object' && a0.col ? a0.col : '';
+      const field = String(col).includes('completed') ? 'completedAt' : 'createdAt';
+      return formatDate(task[field]);
+    }
     if (expr && typeof expr === 'object' && expr.fn === 'strftime' && expr.args && expr.args[0] === '%H') {
-      return formatHour(task.createdAt);
+      const colNode = expr.args[1];
+      const col = colNode && typeof colNode === 'object' && colNode.col ? colNode.col : '';
+      const field = String(col).includes('completed') ? 'completedAt' : 'createdAt';
+      return formatHour(task[field]);
     }
     if (expr && typeof expr === 'object' && expr.literal && String(expr.literal).includes("strftime('%H'")) {
       return formatQuarter(task.createdAt);
@@ -210,7 +240,8 @@ describe('@kne/fastify-task', function () {
         return [count];
       },
       rawAttributes: {
-        createdAt: { field: 'created_at' }
+        createdAt: { field: 'created_at' },
+        completedAt: { field: 'completed_at' }
       },
       sequelize: {
         Sequelize: {
@@ -261,18 +292,84 @@ describe('@kne/fastify-task', function () {
     };
   };
 
+  const createMockHourlyStatsModel = Op => {
+    return {
+      findOrCreate: async ({ where, defaults }) => {
+        const existing = hourlyStatsData.find(
+          s =>
+            +new Date(s.bucketStartUtc) === +new Date(where.bucketStartUtc) &&
+            s.type === where.type &&
+            s.runnerType === where.runnerType
+        );
+        if (existing) {
+          return [existing, false];
+        }
+        const stat = {
+          ...defaults,
+          update: async function (updateData) {
+            Object.assign(this, updateData);
+            return this;
+          }
+        };
+        hourlyStatsData.push(stat);
+        return [stat, true];
+      },
+      create: async data => {
+        const row = {
+          ...data,
+          update: async function (updateData) {
+            Object.assign(this, updateData);
+            return this;
+          }
+        };
+        hourlyStatsData.push(row);
+        return row;
+      },
+      destroy: async ({ where } = {}) => {
+        const bs = where && where.bucketStartUtc;
+        if (bs == null) return 0;
+        const t0 = +new Date(bs);
+        const before = hourlyStatsData.length;
+        for (let i = hourlyStatsData.length - 1; i >= 0; i--) {
+          if (+new Date(hourlyStatsData[i].bucketStartUtc) === t0) {
+            hourlyStatsData.splice(i, 1);
+          }
+        }
+        return before - hourlyStatsData.length;
+      },
+      findAll: async ({ where } = {}) => {
+        let results = hourlyStatsData;
+        if (where && where.bucketStartUtc && where.bucketStartUtc[Op.between]) {
+          const [a, z] = where.bucketStartUtc[Op.between];
+          const ta = +new Date(a);
+          const tz = +new Date(z);
+          results = hourlyStatsData.filter(s => {
+            const t = +new Date(s.bucketStartUtc);
+            return t >= ta && t <= tz;
+          });
+        }
+        return results.slice().sort((x, y) => +new Date(x.bucketStartUtc) - +new Date(y.bucketStartUtc));
+      }
+    };
+  };
+
   const createFastify = async (options = {}) => {
     const app = require('fastify')();
     const Op = {
       in: Symbol('in'),
       lte: Symbol('lte'),
       gte: Symbol('gte'),
+      lt: Symbol('lt'),
+      gt: Symbol('gt'),
       between: Symbol('between'),
-      like: Symbol('like')
+      ne: Symbol('ne'),
+      like: Symbol('like'),
+      or: Symbol('or')
     };
 
     const mockTaskModel = createMockTaskModel(Op);
     const mockDailyStatsModel = createMockDailyStatsModel(Op);
+    const mockHourlyStatsModel = createMockHourlyStatsModel(Op);
 
     // 模拟 sequelize
     app.decorate('sequelize', {
@@ -323,16 +420,20 @@ describe('@kne/fastify-task', function () {
 
     app.decorate('task', {
       options: taskOptions,
-      models: { task: mockTaskModel, taskDailyStatistics: mockDailyStatsModel },
+      models: { task: mockTaskModel, taskDailyStatistics: mockDailyStatsModel, taskHourlyStatistics: mockHourlyStatsModel },
       services: {},
       controllers: {}
     });
 
-    // 加载 services
+    // 加载 services（统计插件须先于主业务 service，与命名空间 autoload + fp 依赖一致）
+    const statisticsServiceModule = require('../libs/services/statistics');
+    await statisticsServiceModule(app, taskOptions);
     const serviceModule = require('../libs/services/main');
     await serviceModule(app, taskOptions);
 
-    // 加载 controllers
+    // 加载 controllers（统计路由独立插件）
+    const statisticsControllerModule = require('../libs/controllers/statistics');
+    await statisticsControllerModule(app, taskOptions);
     const controllerModule = require('../libs/controllers/main');
     await controllerModule(app, taskOptions);
 
@@ -342,6 +443,7 @@ describe('@kne/fastify-task', function () {
   beforeEach(() => {
     taskData = [];
     dailyStatsData = [];
+    hourlyStatsData = [];
     taskIdCounter = 1;
   });
 
@@ -386,6 +488,9 @@ describe('@kne/fastify-task', function () {
       expect(services.retry).to.exist;
       expect(services.log).to.exist;
       expect(services.callback).to.exist;
+      expect(services.syncHourlyStatisticsFromTasks).to.exist;
+      expect(services.statistics).to.exist;
+      expect(services.statistics.getOverview).to.exist;
     });
 
     it('should register all API routes', async () => {
@@ -1354,6 +1459,115 @@ describe('@kne/fastify-task', function () {
       expect(stat.byRunnerType['manual'].count).to.equal(1);
     });
 
+    it('should fill hourly statistics when syncHourlyStatisticsFromTasks runs for that UTC hour', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+
+      const created = await fastify.task.services.create({
+        type: 'test-type',
+        targetId: 'target-hourly-1',
+        targetType: 'document',
+        runnerType: 'manual'
+      });
+
+      await fastify.task.services.complete({
+        id: created.id,
+        status: 'success',
+        output: { result: 'done' },
+        userId: 'user-1'
+      });
+
+      await new Promise(resolve => setTimeout(resolve, 150));
+      expect(hourlyStatsData.length).to.equal(0);
+
+      const taskRow = taskData.find(t => t.id === created.id);
+      const bucketStart = dayjs.utc(taskRow.completedAt).startOf('hour').toDate();
+      await fastify.task.services.syncHourlyStatisticsFromTasks({ bucketStartUtc: bucketStart });
+
+      expect(hourlyStatsData.length).to.equal(1);
+      const h = hourlyStatsData[0];
+      expect(h.type).to.equal('test-type');
+      expect(h.runnerType).to.equal('manual');
+      expect(h.totalCompleted).to.equal(1);
+      expect(h.successCount).to.equal(1);
+    });
+
+    it('should coerce string BIGINT / INTEGER counters from DB before arithmetic (mysql2-style)', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+
+      const statDate = dayjs().format('YYYY-MM-DD');
+      dailyStatsData.push({
+        date: statDate,
+        totalCompleted: '5',
+        successCount: '5',
+        failedCount: '0',
+        canceledCount: '0',
+        totalWaitingTime: '39744',
+        totalExecutionTime: '61960',
+        totalTime: '101704',
+        timedTaskCount: '5',
+        byType: {
+          'existing-type': {
+            count: 5,
+            successCount: 5,
+            failedCount: 0,
+            canceledCount: 0,
+            totalWaitingTime: 39744,
+            totalExecutionTime: 61960,
+            totalTime: 101704,
+            timedTaskCount: 5
+          }
+        },
+        byRunnerType: {
+          manual: {
+            count: 5,
+            successCount: 5,
+            failedCount: 0,
+            canceledCount: 0,
+            totalWaitingTime: 39744,
+            totalExecutionTime: 61960,
+            totalTime: 101704,
+            timedTaskCount: 5
+          }
+        },
+        update: async function (updateData) {
+          Object.assign(this, updateData);
+          return this;
+        }
+      });
+
+      const created = await fastify.task.services.create({
+        type: 'test-type',
+        targetId: 'target-1',
+        targetType: 'document',
+        runnerType: 'manual'
+      });
+
+      await new Promise(resolve => setTimeout(resolve, 15));
+      await fastify.task.services.complete({
+        id: created.id,
+        status: 'success',
+        output: { result: 'done' },
+        userId: 'user-1'
+      });
+
+      await new Promise(resolve => setTimeout(resolve, 150));
+
+      const stat = dailyStatsData.find(s => s.date === statDate);
+      expect(stat).to.exist;
+      // 若未做 Number 归一化，'5' + 1 会得到 "51"
+      expect(stat.totalCompleted).to.equal(6);
+      expect(stat.successCount).to.equal(6);
+      expect(typeof stat.totalCompleted).to.equal('number');
+      expect(stat.byType['existing-type'].count).to.equal(5);
+      expect(stat.byType['test-type'].count).to.equal(1);
+      // 顶层 BIGINT 不应出现字符串拼接级天文数字
+      expect(Number(stat.totalWaitingTime)).to.be.finite;
+      expect(Number(stat.totalWaitingTime)).to.be.at.most(1e12);
+      expect(Number(stat.totalWaitingTime)).to.be.at.least(39744);
+    });
+
     it('should not throw when updateDailyStatistics encounters an error', async () => {
       fastify = await createFastify();
       await fastify.ready();
@@ -1402,6 +1616,8 @@ describe('@kne/fastify-task', function () {
       expect(result.recentTrendByStatus).to.exist;
       expect(result.recentTrendByType).to.exist;
       expect(result.durationTrend).to.exist;
+      expect(result.hourlyCompletionTrend).to.exist;
+      expect(Array.isArray(result.hourlyCompletionTrend)).to.be.true;
     });
 
     it('should normalize invalid range to 7d', async () => {
@@ -1496,6 +1712,49 @@ describe('@kne/fastify-task', function () {
       const result = await fastify.task.services.statistics.getOverview({ range: '7d' });
 
       expect(result.durationTrend).to.deep.equal([]);
+      expect(result.hourlyCompletionTrend).to.deep.equal([]);
+    });
+
+    it('should map hourlyCompletionTrend to client timezone from UTC buckets', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+
+      const now = new Date();
+      await fastify.task.models.task.create({
+        type: 'import',
+        runnerType: 'system',
+        status: 'success',
+        targetId: 'hourly-overview-1',
+        targetType: 'document',
+        createdAt: new Date(now.getTime() - 60000),
+        completedAt: now
+      });
+      await fastify.task.models.task.create({
+        type: 'import',
+        runnerType: 'system',
+        status: 'success',
+        targetId: 'hourly-overview-2',
+        targetType: 'document',
+        createdAt: new Date(now.getTime() - 60000),
+        completedAt: now
+      });
+      await fastify.task.models.task.create({
+        type: 'import',
+        runnerType: 'system',
+        status: 'success',
+        targetId: 'hourly-overview-3',
+        targetType: 'document',
+        createdAt: new Date(now.getTime() - 60000),
+        completedAt: now
+      });
+
+      const result = await fastify.task.services.statistics.getOverview({ range: '7d', timezone: 'Asia/Shanghai' });
+
+      expect(result.hourlyCompletionTrend.length).to.be.greaterThan(0);
+      const row = result.hourlyCompletionTrend.find(r => r.type === 'import' && r.runnerType === 'system');
+      expect(row).to.exist;
+      expect(row.totalCompleted).to.equal(3);
+      expect(typeof row.hour).to.equal('number');
     });
 
     it('should return byType/byRunnerType with avg timing in durationTrend', async () => {
@@ -1591,6 +1850,11 @@ describe('@kne/fastify-task', function () {
       expect(result.byStatus).to.exist;
       expect(result.byType).to.exist;
       expect(result.byRunnerType).to.exist;
+      expect(result.pendingByRunnerType).to.exist;
+      expect(result.waitingByRunnerType).to.exist;
+      expect(result.completedToday).to.exist;
+      expect(result.waitingQueueMaxWaitMsByRunnerType).to.exist;
+      expect(result.completedTodayTotalDurationMsByRunnerType).to.exist;
       expect(result.runnerTypeStats).to.exist;
       expect(result.hourlyTrend).to.exist;
       expect(result.hourlyTrendByStatus).to.exist;
@@ -1610,6 +1874,7 @@ describe('@kne/fastify-task', function () {
       expect(result.todayDuration.avgTotalTime).to.equal(0);
       expect(result.todayDuration.byType).to.deep.equal({});
       expect(result.todayDuration.byRunnerType).to.deep.equal({});
+      expect(result.todayDuration.byTypeByRunnerType).to.deep.equal({ manual: {}, system: {} });
     });
 
     it('should fall back to today task aggregates when daily statistics are missing', async () => {
@@ -1633,11 +1898,14 @@ describe('@kne/fastify-task', function () {
 
       const result = await fastify.task.services.statistics.getRealtime({});
 
+      expect(result.completedToday.manual).to.equal(1);
       expect(result.todayDuration.completedCount).to.equal(1);
       expect(result.todayDuration.avgTotalTime).to.be.greaterThan(0);
       expect(result.todayDuration.byType.import.count).to.equal(1);
       expect(result.todayDuration.byType.import.avgTotalTime).to.be.greaterThan(0);
       expect(result.todayDuration.byRunnerType.manual.count).to.equal(1);
+      expect(result.todayDuration.byTypeByRunnerType.manual.import.count).to.equal(1);
+      expect(result.todayDuration.byTypeByRunnerType.system).to.deep.equal({});
     });
 
     it('should return todayDuration from daily statistics', async () => {
@@ -1695,6 +1963,7 @@ describe('@kne/fastify-task', function () {
       expect(result.todayDuration.byType['test-type'].avgWaitingTime).to.equal(5000);
       expect(result.todayDuration.byRunnerType['manual'].count).to.equal(10);
       expect(result.todayDuration.byRunnerType['manual'].avgExecutionTime).to.equal(10000);
+      expect(result.todayDuration.byTypeByRunnerType).to.deep.equal({ manual: {}, system: {} });
     });
 
     it('should aggregate hourlyTrendByType and hourlyTrendByStatus correctly', async () => {
@@ -1839,6 +2108,119 @@ describe('@kne/fastify-task', function () {
 
       expect(result.runnerTypeStats.manual).to.deep.equal({ total: 3, pending: 1, executed: 2 });
       expect(result.runnerTypeStats.system).to.deep.equal({ total: 1, pending: 1, executed: 0 });
+      expect(result.waitingByRunnerType.manual).to.equal(1);
+      expect(result.waitingByRunnerType.system).to.equal(undefined);
+    });
+
+    it('should expose waitingByRunnerType (waiting + manual pending) and completedToday by completedAt', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+
+      const now = new Date();
+      const earlier = new Date(now.getTime() - 60000);
+
+      await fastify.task.models.task.create({
+        type: 'import',
+        status: 'pending',
+        runnerType: 'manual',
+        targetId: 'wt-1',
+        targetType: 'doc',
+        createdAt: now
+      });
+      await fastify.task.models.task.create({
+        type: 'import',
+        status: 'pending',
+        runnerType: 'manual',
+        targetId: 'wt-2',
+        targetType: 'doc',
+        createdAt: now
+      });
+      await fastify.task.models.task.create({
+        type: 'import',
+        status: 'pending',
+        runnerType: 'system',
+        targetId: 'wt-3',
+        targetType: 'doc',
+        createdAt: now
+      });
+      await fastify.task.models.task.create({
+        type: 'import',
+        status: 'waiting',
+        runnerType: 'system',
+        targetId: 'wt-4',
+        targetType: 'doc',
+        createdAt: now
+      });
+      await fastify.task.models.task.create({
+        type: 'import',
+        status: 'success',
+        runnerType: 'manual',
+        targetId: 'wt-5',
+        targetType: 'doc',
+        createdAt: earlier,
+        completedAt: now
+      });
+
+      const result = await fastify.task.services.statistics.getRealtime({});
+
+      expect(result.waitingByRunnerType.manual).to.equal(2);
+      expect(result.waitingByRunnerType.system).to.equal(1);
+      expect(result.completedToday.manual).to.equal(1);
+      expect(result.waitingQueueMaxWaitMsByRunnerType.manual).to.be.a('number');
+      expect(result.waitingQueueMaxWaitMsByRunnerType.manual).to.be.at.least(0);
+      expect(result.completedTodayTotalDurationMsByRunnerType.manual).to.be.a('number');
+      expect(result.completedTodayTotalDurationMsByRunnerType.manual).to.be.at.least(0);
+    });
+
+    it('should compute waitingQueue max wait and completedToday total duration from task timestamps', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+
+      const now = new Date();
+      const fiveMinAgo = new Date(now.getTime() - 5 * 60 * 1000);
+      const tenMinAgo = new Date(now.getTime() - 10 * 60 * 1000);
+
+      await fastify.task.models.task.create({
+        type: 'import',
+        status: 'pending',
+        runnerType: 'manual',
+        targetId: 'dur-w-1',
+        targetType: 'doc',
+        createdAt: tenMinAgo
+      });
+      await fastify.task.models.task.create({
+        type: 'import',
+        status: 'pending',
+        runnerType: 'manual',
+        targetId: 'dur-w-2',
+        targetType: 'doc',
+        createdAt: fiveMinAgo
+      });
+      await fastify.task.models.task.create({
+        type: 'import',
+        status: 'success',
+        runnerType: 'manual',
+        targetId: 'dur-c-1',
+        targetType: 'doc',
+        createdAt: tenMinAgo,
+        completedAt: now
+      });
+      await fastify.task.models.task.create({
+        type: 'import',
+        status: 'success',
+        runnerType: 'manual',
+        targetId: 'dur-c-2',
+        targetType: 'doc',
+        createdAt: fiveMinAgo,
+        completedAt: now
+      });
+
+      const result = await fastify.task.services.statistics.getRealtime({});
+
+      expect(result.waitingQueueMaxWaitMsByRunnerType.manual).to.be.at.least(10 * 60 * 1000 - 2000);
+      expect(result.waitingQueueMaxWaitMsByRunnerType.manual).to.be.at.most(10 * 60 * 1000 + 2000);
+      expect(result.completedTodayTotalDurationMsByRunnerType.manual).to.be.at.least(15 * 60 * 1000 - 2000);
+      expect(result.completedTodayTotalDurationMsByRunnerType.manual).to.be.at.most(15 * 60 * 1000 + 2000);
     });
 
     it('should format realtime date with timezone parameter', async () => {
@@ -1898,19 +2280,21 @@ describe('@kne/fastify-task', function () {
         recentTrend: [],
         recentTrendByStatus: [],
         recentTrendByType: [],
-        durationTrend: []
+        durationTrend: [],
+        hourlyCompletionTrend: []
       });
 
       const res = await fastify.inject({
         method: 'GET',
-        url: '/api/task/statistics?range=7d&timezone=UTC&type=import'
+        url: '/api/task/statistics?range=7d&timezone=UTC&type=import&runnerType=manual'
       });
       expect(res.statusCode).to.equal(200);
       expect(overviewStub.calledOnce).to.be.true;
       expect(overviewStub.firstCall.args[0]).to.deep.equal({
         range: '7d',
         timezone: 'UTC',
-        type: 'import'
+        type: 'import',
+        runnerType: 'manual'
       });
     });
 
