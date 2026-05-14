@@ -15,6 +15,8 @@ module.exports = fp(
         scriptName: 'index',
         maxPollTimes: 20,
         pollInterval: 10000,
+        /** 每小时任务完成按 UTC 桶重算（默认每时第 5 分执行，聚合上一完整 UTC 小时）；传 null/false 关闭 */
+        hourlyStatisticsCronTime: '5 * * * *',
         getUserModel: () => {
           return fastify.account.models.user;
         },
@@ -57,6 +59,17 @@ module.exports = fp(
           //启动时，将running状态的任务设置为pending
           fastify.addHook('onReady', async () => {
             await fastify[options.name].services.resetAll();
+            fastify[options.name].services.syncHourlyStatisticsFromTasks().catch(console.error);
+          });
+        }
+        if (options.hourlyStatisticsCronTime) {
+          fastify.cron.createJob({
+            cronTime: options.hourlyStatisticsCronTime,
+            onTick: async () => {
+              const { syncHourlyStatisticsFromTasks } = fastify[options.name].services;
+              await syncHourlyStatisticsFromTasks();
+            },
+            start: true
           });
         }
       })
