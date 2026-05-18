@@ -28,6 +28,8 @@ module.exports = fp(
       options
     );
 
+    fastify.register(require('@fastify/sse'));
+
     fastify.register(require('@kne/fastify-namespace'), {
       options,
       name: options.name,
