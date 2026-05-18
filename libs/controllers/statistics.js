@@ -173,9 +173,8 @@ module.exports = fp(
       }
     },
     async function (request, reply) {
-      const intervalSeconds = request.query.interval;
+      const intervalSeconds = request.query.interval ?? 5;
       const { timezone, type, runnerType } = request.query;
-      reply.sse.keepAlive();
 
       async function* eventStream() {
         while (reply.sse.isConnected) {
