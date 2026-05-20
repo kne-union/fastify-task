@@ -1,9 +1,8 @@
 const fp = require('fastify-plugin');
 
 /** 看板统计：概览 GET /statistics 与 SSE /statistics/sse（独立 controller 插件，见业务插件开发指南「路由标准化」） */
-module.exports = fp(
-  async (fastify, options) => {
-    const { services } = fastify[options.name];
+module.exports = fp(async (fastify, options) => {
+  const { services } = fastify[options.name];
 
   fastify.get(
     `${options.prefix}/statistics`,
@@ -175,9 +174,15 @@ module.exports = fp(
     async function (request, reply) {
       const intervalSeconds = request.query.interval ?? 5;
       const { timezone, type, runnerType } = request.query;
+      const startTime = Date.now();
+      const maxDurationMs = 30 * 60 * 1000;
 
       async function* eventStream() {
         while (reply.sse.isConnected) {
+          if (Date.now() - startTime >= maxDurationMs) {
+            yield { event: 'timeout', data: JSON.stringify({ message: '连接已超过30分钟，自动断开' }) };
+            return;
+          }
           try {
             yield { data: JSON.stringify(await services.statistics.getRealtime({ timezone, type, runnerType })) };
           } catch (err) {
@@ -190,4 +195,4 @@ module.exports = fp(
       await reply.sse.send(eventStream());
     }
   );
-  });
+});

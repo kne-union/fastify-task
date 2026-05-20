@@ -28,7 +28,9 @@ module.exports = fp(
       options
     );
 
-    fastify.register(require('@fastify/sse'));
+    if (!fastify.sse) {
+      fastify.register(require('@fastify/sse'));
+    }
 
     fastify.register(require('@kne/fastify-namespace'), {
       options,
