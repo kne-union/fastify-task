@@ -8,8 +8,7 @@ module.exports = fp(async (fastify, options) => {
   const { Op } = fastify.sequelize.Sequelize;
 
   /** statistics 插件在 main 之后注册，不能在初始化时解构，否则恒为 undefined */
-  const callFlushCompletionStatistics = task =>
-    fastify[options.name].services.flushCompletionStatistics?.(task);
+  const callFlushCompletionStatistics = task => fastify[options.name].services.flushCompletionStatistics?.(task);
 
   const generateSignature = ({ secret, id, data }) => {
     const dataToSign = `${id}|${typeof data === 'string' ? data : JSON.stringify(data)}`;
@@ -57,7 +56,7 @@ module.exports = fp(async (fastify, options) => {
   const executor = async ({ type, scriptName, ...props }) => {
     const taskModulePath = path.resolve(options.dir, type, `${scriptName || options.scriptName}.js`);
     if (!(await fs.exists(taskModulePath))) {
-      throw new Error(`未匹配到任务执行器:${taskModulePath}`);
+      console.warn(`未匹配到任务执行器:${taskModulePath}`);
     }
     return await require(taskModulePath)(fastify, options, {
       ...props,
