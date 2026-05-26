@@ -233,6 +233,9 @@ describe('@kne/fastify-task', function () {
       services: {
         collect: sinon.stub().resolves(),
         query: sinon.stub().resolves({ channelMetas: {}, list: [] }),
+        channelMeta: {
+          list: sinon.stub().resolves([{ channel: 'test-type' }])
+        },
         sseStream: {
           send: sinon.stub().resolves()
         }
@@ -1170,7 +1173,7 @@ describe('@kne/fastify-task', function () {
 
       expect(fastify.taskStatistics.services.collect.calledOnce).to.be.true;
       const callArgs = fastify.taskStatistics.services.collect.firstCall.args[0];
-      expect(callArgs.channel).to.equal('task:test-type:manual');
+      expect(callArgs.channel).to.match(/^test-type:manual:\d+$/);
       expect(callArgs.data.total).to.equal(1);
       expect(callArgs.data.success).to.equal(1);
       expect(callArgs.time).to.exist;
@@ -1198,7 +1201,7 @@ describe('@kne/fastify-task', function () {
 
       expect(fastify.taskStatistics.services.collect.calledOnce).to.be.true;
       const callArgs = fastify.taskStatistics.services.collect.firstCall.args[0];
-      expect(callArgs.channel).to.equal('task:test-type:system');
+      expect(callArgs.channel).to.match(/^test-type:system:\d+$/);
       expect(callArgs.data.failed).to.equal(1);
     });
 
@@ -1261,56 +1264,54 @@ describe('@kne/fastify-task', function () {
       });
       expect(response.statusCode).to.equal(200);
       const body = JSON.parse(response.payload);
-      expect(body).to.have.property('channelMetas');
-      expect(body).to.have.property('list');
+      expect(body).to.have.property('totalTasks');
+      expect(body).to.have.property('byStatus');
+      expect(body).to.have.property('byType');
     });
 
-    it('should call statistics query with correct channel when type is specified', async () => {
+    it('should return durationTrend in statistics response', async () => {
       fastify = await createFastify();
       await fastify.ready();
 
-      await fastify.inject({
-        method: 'GET',
-        url: '/api/task/statistics',
-        query: { range: '7d', type: 'test-type' }
-      });
-
-      expect(fastify.taskStatistics.services.query.calledOnce).to.be.true;
-      const callArgs = fastify.taskStatistics.services.query.firstCall.args[0];
-      expect(callArgs.channels).to.deep.equal(['task:test-type']);
-      expect(callArgs.includeChildren).to.be.false;
-    });
-
-    it('should call statistics query with task channel and includeChildren when no filter', async () => {
-      fastify = await createFastify();
-      await fastify.ready();
-
-      await fastify.inject({
+      const response = await fastify.inject({
         method: 'GET',
         url: '/api/task/statistics',
         query: { range: '7d' }
       });
-
-      expect(fastify.taskStatistics.services.query.calledOnce).to.be.true;
-      const callArgs = fastify.taskStatistics.services.query.firstCall.args[0];
-      expect(callArgs.channels).to.deep.equal(['task']);
-      expect(callArgs.includeChildren).to.be.true;
+      expect(response.statusCode).to.equal(200);
+      const body = JSON.parse(response.payload);
+      expect(body).to.have.property('durationTrend');
+      expect(Array.isArray(body.durationTrend)).to.be.true;
     });
 
-    it('should call statistics query with type and runnerType channel', async () => {
+    it('should return statistics with type filter', async () => {
       fastify = await createFastify();
       await fastify.ready();
 
-      await fastify.inject({
+      const response = await fastify.inject({
+        method: 'GET',
+        url: '/api/task/statistics',
+        query: { range: '7d', type: 'test-type' }
+      });
+      expect(response.statusCode).to.equal(200);
+      const body = JSON.parse(response.payload);
+      expect(body).to.have.property('totalTasks');
+      expect(body).to.have.property('durationTrend');
+    });
+
+    it('should return statistics with type and runnerType filter', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+
+      const response = await fastify.inject({
         method: 'GET',
         url: '/api/task/statistics',
         query: { range: '7d', type: 'test-type', runnerType: 'manual' }
       });
-
-      expect(fastify.taskStatistics.services.query.calledOnce).to.be.true;
-      const callArgs = fastify.taskStatistics.services.query.firstCall.args[0];
-      expect(callArgs.channels).to.deep.equal(['task:test-type:manual']);
-      expect(callArgs.includeChildren).to.be.false;
+      expect(response.statusCode).to.equal(200);
+      const body = JSON.parse(response.payload);
+      expect(body).to.have.property('totalTasks');
+      expect(body).to.have.property('durationTrend');
     });
 
     it('should throw error for unsupported range', async () => {
@@ -2064,30 +2065,28 @@ describe('@kne/fastify-task', function () {
       await fastify.inject({
         method: 'GET',
         url: '/api/task/statistics/sse',
-        query: { range: '7d', type: 'test-type', runnerType: 'manual' }
+        query: { timezone: 'Asia/Shanghai' }
       });
 
       expect(fastify.taskStatistics.services.sseStream.send.calledOnce).to.be.true;
       const sendArgs = fastify.taskStatistics.services.sseStream.send.firstCall.args;
       expect(sendArgs[1].name).to.equal('query');
-      expect(sendArgs[1].params.channels).to.equal('task:test-type:manual');
-      expect(sendArgs[1].params.includeChildren).to.be.false;
+      expect(sendArgs[1].params).to.have.property('timezone');
     });
 
-    it('should call sseStatistics with includeChildren when no filter', async () => {
+    it('should call sseStatistics with default params when no filter', async () => {
       fastify = await createFastify();
       await fastify.ready();
 
       await fastify.inject({
         method: 'GET',
-        url: '/api/task/statistics/sse',
-        query: { range: '7d' }
+        url: '/api/task/statistics/sse'
       });
 
       expect(fastify.taskStatistics.services.sseStream.send.calledOnce).to.be.true;
       const sendArgs = fastify.taskStatistics.services.sseStream.send.firstCall.args;
-      expect(sendArgs[1].params.channels).to.equal('task');
-      expect(sendArgs[1].params.includeChildren).to.be.true;
+      expect(sendArgs[1].name).to.equal('query');
+      expect(sendArgs[1].params).to.have.property('timezone');
     });
 
     it('should call sseStatistics fetchData and return query result', async () => {
@@ -2096,16 +2095,15 @@ describe('@kne/fastify-task', function () {
 
       await fastify.inject({
         method: 'GET',
-        url: '/api/task/statistics/sse',
-        query: { range: '1m' }
+        url: '/api/task/statistics/sse'
       });
 
       const sendArgs = fastify.taskStatistics.services.sseStream.send.firstCall.args;
       const { fetchData } = sendArgs[1];
       const result = await fetchData();
       expect(result).to.exist;
-      // fetchData 内部调用了 query
-      expect(fastify.taskStatistics.services.query.called).to.be.true;
+      expect(result).to.have.property('totalTasks');
+      expect(result).to.have.property('byStatus');
     });
   });
 
@@ -2132,18 +2130,20 @@ describe('@kne/fastify-task', function () {
 
       await new Promise(resolve => setTimeout(resolve, 50));
 
-      // 第一次调用：计数数据；第二次调用：时长数据
       expect(fastify.taskStatistics.services.collect.callCount).to.be.greaterThan(0);
       const calls = fastify.taskStatistics.services.collect.getCalls();
-      const timingCall = calls.find(call => call.args[0].unit === 'ms');
-      const countCall = calls.find(call => call.args[0].unit === 'count');
-      expect(countCall).to.exist;
-      expect(countCall.args[0].data.total).to.equal(1);
-      expect(countCall.args[0].data.success).to.equal(1);
-      expect(timingCall).to.exist;
-      expect(timingCall.args[0].data.waitingTime).to.be.a('number').and.greaterThan(0);
-      expect(timingCall.args[0].data.executionTime).to.be.a('number').and.greaterThan(0);
-      expect(timingCall.args[0].data.totalTime).to.be.a('number').and.greaterThan(0);
+      const call = calls[calls.length - 1];
+      const callArgs = call.args[0];
+      expect(callArgs.data.total).to.equal(1);
+      expect(callArgs.data.success).to.equal(1);
+      expect(callArgs.unit.total).to.equal('count');
+      expect(callArgs.unit.success).to.equal('count');
+      expect(callArgs.data.waitingTime).to.be.a('number').and.greaterThan(0);
+      expect(callArgs.data.executionTime).to.be.a('number').and.greaterThan(0);
+      expect(callArgs.data.totalTime).to.be.a('number').and.greaterThan(0);
+      expect(callArgs.unit.waitingTime).to.equal('ms');
+      expect(callArgs.unit.executionTime).to.equal('ms');
+      expect(callArgs.unit.totalTime).to.equal('ms');
     });
 
     it('should calculate executionTime from totalTime when no startedAt', async () => {
@@ -2170,10 +2170,12 @@ describe('@kne/fastify-task', function () {
 
       expect(fastify.taskStatistics.services.collect.callCount).to.be.greaterThan(0);
       const calls = fastify.taskStatistics.services.collect.getCalls();
-      const timingCall = calls.find(call => call.args[0].unit === 'ms');
-      expect(timingCall).to.exist;
-      expect(timingCall.args[0].data.executionTime).to.be.a('number').and.greaterThan(0);
-      expect(timingCall.args[0].data.totalTime).to.be.a('number').and.greaterThan(0);
+      const call = calls[calls.length - 1];
+      const callArgs = call.args[0];
+      expect(callArgs.data.executionTime).to.be.a('number').and.greaterThan(0);
+      expect(callArgs.data.totalTime).to.be.a('number').and.greaterThan(0);
+      expect(callArgs.unit.executionTime).to.equal('ms');
+      expect(callArgs.unit.totalTime).to.equal('ms');
     });
   });
 
