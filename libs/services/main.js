@@ -8,7 +8,11 @@ module.exports = fp(async (fastify, options) => {
   const { Op } = fastify.sequelize.Sequelize;
 
   /** 通过 @kne/fastify-statistics 采集任务完成数据 */
-  const collectTaskStatistics = task => {
+  const collectTaskStatistics = async task => {
+    // 确保 task 数据是最新的（Sequelize update 后实例可能未完全同步）
+    if (task.reload && typeof task.reload === 'function') {
+      await task.reload();
+    }
     const completedAt = task.completedAt || new Date();
     const createdAt = task.createdAt;
     const startedAt = task.startedAt;
@@ -28,25 +32,35 @@ module.exports = fp(async (fastify, options) => {
       hasTiming = totalTime > 0;
     }
 
-    const data = {
-      total: 1,
-      [task.status]: 1
-    };
-    if (hasTiming) {
-      data.waitingTime = waitingTime;
-      data.executionTime = executionTime;
-      data.totalTime = totalTime;
-    }
+    const channel = `task:${task.type}:${task.runnerType || 'manual'}`;
+    const status = task.status || 'unknown';
 
+    // 分两次采集：计数指标和时长指标，避免聚合时不同语义的值混在一起
+    const countData = { total: 1, [status]: 1 };
     fastify[`${options.name}Statistics`].services
       .collect({
-        channel: `task:${task.type}:${task.runnerType || 'manual'}`,
-        data,
+        channel,
+        data: countData,
+        unit: 'count',
         time: completedAt
       })
       .catch(e => {
         fastify.log.error(`采集任务统计数据失败: ${e.message}`);
       });
+
+    if (hasTiming) {
+      const timingData = { waitingTime, executionTime, totalTime };
+      fastify[`${options.name}Statistics`].services
+        .collect({
+          channel,
+          data: timingData,
+          unit: 'ms',
+          time: completedAt
+        })
+        .catch(e => {
+          fastify.log.error(`采集任务统计数据失败: ${e.message}`);
+        });
+    }
   };
 
   const generateSignature = ({ secret, id, data }) => {
