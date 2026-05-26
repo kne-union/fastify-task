@@ -24,6 +24,25 @@ module.exports = ({ DataTypes, definePrimaryType, options }) => {
         defaultValue: 'manual',
         allowNull: false
       },
+      priority: {
+        type: DataTypes.INTEGER,
+        comment: '任务优先级，数值越大越优先',
+        defaultValue: 0
+      },
+      parentTaskId: definePrimaryType('parentTaskId', {
+        comment: '父任务ID，用于任务依赖/链式执行',
+        allowNull: true
+      }),
+      retryCount: {
+        type: DataTypes.INTEGER,
+        comment: '已重试次数',
+        defaultValue: 0
+      },
+      maxRetries: {
+        type: DataTypes.INTEGER,
+        comment: '最大重试次数，0表示不自动重试',
+        defaultValue: 0
+      },
       startTime: {
         type: DataTypes.DATE,
         comment: '任务最早执行时间',
@@ -37,13 +56,18 @@ module.exports = ({ DataTypes, definePrimaryType, options }) => {
         type: DataTypes.DATE,
         comment: '任务完成时间'
       },
+      completedUserId: definePrimaryType('completedUserId', {
+        comment: '完成任务的用户ID'
+      }),
       input: {
         type: DataTypes.JSON,
-        comment: '输入数据'
+        comment: '输入数据',
+        defaultValue: null
       },
       output: {
         type: DataTypes.JSON,
-        comment: '输出数据'
+        comment: '输出数据',
+        defaultValue: null
       },
       error: {
         type: DataTypes.JSON,
@@ -94,6 +118,11 @@ module.exports = ({ DataTypes, definePrimaryType, options }) => {
         as: 'completedUser',
         comment: '任务完成人'
       });
+      task.belongsTo(task, {
+        foreignKey: 'parentTaskId',
+        as: 'parentTask',
+        comment: '父任务'
+      });
     },
     options: {
       comment: '任务',
@@ -104,7 +133,9 @@ module.exports = ({ DataTypes, definePrimaryType, options }) => {
         { fields: ['runner_type'] },
         { fields: ['type', 'status'] },
         { fields: ['runner_type', 'status'] },
-        { fields: ['target_id', 'target_type', 'type'] }
+        { fields: ['target_id', 'target_type', 'type'] },
+        { fields: ['parent_task_id'] },
+        { fields: ['priority'] }
       ]
     }
   };

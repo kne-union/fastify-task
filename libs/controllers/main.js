@@ -2,6 +2,68 @@ const fp = require('fastify-plugin');
 
 module.exports = fp(async (fastify, options) => {
   const { services } = fastify[options.name];
+  // #14: 新增创建任务的 REST 接口
+  fastify.post(
+    `${options.prefix}/create`,
+    {
+      onRequest: options.getAuthenticate('write'),
+      schema: {
+        summary: '创建任务',
+        body: {
+          type: 'object',
+          properties: {
+            type: {
+              type: 'string',
+              description: '任务类型'
+            },
+            targetId: {
+              type: 'string',
+              description: '目标对象ID'
+            },
+            targetType: {
+              type: 'string',
+              description: '目标对象类型'
+            },
+            input: {
+              type: 'object',
+              description: '输入数据'
+            },
+            runnerType: {
+              type: 'string',
+              enum: ['manual', 'system'],
+              description: '执行者类型'
+            },
+            delay: {
+              type: 'number',
+              description: '延迟执行秒数'
+            },
+            scriptName: {
+              type: 'string',
+              description: '任务脚本名称'
+            },
+            priority: {
+              type: 'number',
+              description: '优先级，数值越大越优先，默认0'
+            },
+            parentTaskId: {
+              type: 'string',
+              description: '父任务ID，用于任务依赖'
+            },
+            maxRetries: {
+              type: 'number',
+              description: '最大自动重试次数，默认0'
+            }
+          },
+          required: ['type', 'targetId', 'targetType']
+        }
+      }
+    },
+    async request => {
+      const task = await services.create(Object.assign({}, request.body, { userId: request.userInfo?.id }));
+      return { id: task.id };
+    }
+  );
+
   fastify.get(
     `${options.prefix}/list`,
     {
@@ -125,7 +187,20 @@ module.exports = fp(async (fastify, options) => {
           type: 'object',
           properties: {
             id: {
-              type: 'string'
+              type: 'string',
+              description: '任务ID'
+            },
+            targetId: {
+              type: 'string',
+              description: '目标对象ID（批量取消时使用）'
+            },
+            targetType: {
+              type: 'string',
+              description: '目标对象类型（批量取消时使用）'
+            },
+            type: {
+              type: 'string',
+              description: '任务类型（批量取消时使用）'
             }
           }
         }
