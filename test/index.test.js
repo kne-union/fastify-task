@@ -2132,11 +2132,18 @@ describe('@kne/fastify-task', function () {
 
       await new Promise(resolve => setTimeout(resolve, 50));
 
-      expect(fastify.taskStatistics.services.collect.calledOnce).to.be.true;
-      const callArgs = fastify.taskStatistics.services.collect.firstCall.args[0];
-      expect(callArgs.data.waitingTime).to.be.a('number').and.greaterThan(0);
-      expect(callArgs.data.executionTime).to.be.a('number').and.greaterThan(0);
-      expect(callArgs.data.totalTime).to.be.a('number').and.greaterThan(0);
+      // 第一次调用：计数数据；第二次调用：时长数据
+      expect(fastify.taskStatistics.services.collect.callCount).to.be.greaterThan(0);
+      const calls = fastify.taskStatistics.services.collect.getCalls();
+      const timingCall = calls.find(call => call.args[0].unit === 'ms');
+      const countCall = calls.find(call => call.args[0].unit === 'count');
+      expect(countCall).to.exist;
+      expect(countCall.args[0].data.total).to.equal(1);
+      expect(countCall.args[0].data.success).to.equal(1);
+      expect(timingCall).to.exist;
+      expect(timingCall.args[0].data.waitingTime).to.be.a('number').and.greaterThan(0);
+      expect(timingCall.args[0].data.executionTime).to.be.a('number').and.greaterThan(0);
+      expect(timingCall.args[0].data.totalTime).to.be.a('number').and.greaterThan(0);
     });
 
     it('should calculate executionTime from totalTime when no startedAt', async () => {
@@ -2161,10 +2168,12 @@ describe('@kne/fastify-task', function () {
 
       await new Promise(resolve => setTimeout(resolve, 50));
 
-      expect(fastify.taskStatistics.services.collect.calledOnce).to.be.true;
-      const callArgs = fastify.taskStatistics.services.collect.firstCall.args[0];
-      expect(callArgs.data.executionTime).to.be.a('number').and.greaterThan(0);
-      expect(callArgs.data.totalTime).to.be.a('number').and.greaterThan(0);
+      expect(fastify.taskStatistics.services.collect.callCount).to.be.greaterThan(0);
+      const calls = fastify.taskStatistics.services.collect.getCalls();
+      const timingCall = calls.find(call => call.args[0].unit === 'ms');
+      expect(timingCall).to.exist;
+      expect(timingCall.args[0].data.executionTime).to.be.a('number').and.greaterThan(0);
+      expect(timingCall.args[0].data.totalTime).to.be.a('number').and.greaterThan(0);
     });
   });
 
