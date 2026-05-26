@@ -11,12 +11,16 @@ module.exports = fp(
         name: 'task',
         limit: 10,
         dir: path.resolve(process.cwd(), 'libs', 'tasks'),
+        /** 任务目录列表，运行时可通过 addDir 动态添加 */
+        dirs: null,
         cronTime: '*/10 * * * *',
         scriptName: 'index',
         maxPollTimes: 20,
         pollInterval: 10000,
-        /** 每小时任务完成按 UTC 桶重算（默认每时第 5 分执行，聚合上一完整 UTC 小时）；传 null/false 关闭 */
-        hourlyStatisticsCronTime: '5 * * * *',
+        /** 任务执行超时时间（毫秒），0 表示不超时，默认 30 分钟 */
+        taskTimeout: 30 * 60 * 1000,
+        /** 重试基础延迟（毫秒），实际延迟 = retryBaseDelay * 2^(retryCount-1) */
+        retryBaseDelay: 5000,
         getUserModel: () => {
           return fastify.account.models.user;
         },
@@ -28,9 +32,17 @@ module.exports = fp(
       options
     );
 
-    if (!fastify.sse) {
-      fastify.register(require('@fastify/sse'));
+    // 初始化 dirs：优先使用用户传入的 dirs，否则以 dir 为默认值，保证向后兼容
+    if (!options.dirs) {
+      options.dirs = [options.dir];
+    } else if (!options.dirs.includes(options.dir)) {
+      options.dirs = [options.dir, ...options.dirs];
     }
+
+    fastify.register(require('@kne/fastify-statistics'), {
+      dbTableNamePrefix: options.dbTableNamePrefix,
+      name: `${options.name}Statistics`
+    });
 
     fastify.register(require('@kne/fastify-namespace'), {
       options,
@@ -63,17 +75,6 @@ module.exports = fp(
           //启动时，将running状态的任务设置为pending
           fastify.addHook('onReady', async () => {
             await fastify[options.name].services.resetAll();
-            fastify[options.name].services.syncHourlyStatisticsFromTasks().catch(console.error);
-          });
-        }
-        if (options.hourlyStatisticsCronTime) {
-          fastify.cron.createJob({
-            cronTime: options.hourlyStatisticsCronTime,
-            onTick: async () => {
-              const { syncHourlyStatisticsFromTasks } = fastify[options.name].services;
-              await syncHourlyStatisticsFromTasks();
-            },
-            start: true
           });
         }
       })

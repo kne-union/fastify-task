@@ -7,8 +7,47 @@ module.exports = fp(async (fastify, options) => {
   const { models } = fastify[options.name];
   const { Op } = fastify.sequelize.Sequelize;
 
-  /** statistics 插件在 main 之后注册，不能在初始化时解构，否则恒为 undefined */
-  const callFlushCompletionStatistics = task => fastify[options.name].services.flushCompletionStatistics?.(task);
+  /** 通过 @kne/fastify-statistics 采集任务完成数据 */
+  const collectTaskStatistics = task => {
+    const completedAt = task.completedAt || new Date();
+    const createdAt = task.createdAt;
+    const startedAt = task.startedAt;
+    let waitingTime = 0;
+    let executionTime = 0;
+    let totalTime = 0;
+    let hasTiming = false;
+
+    if (createdAt && completedAt) {
+      totalTime = new Date(completedAt).getTime() - new Date(createdAt).getTime();
+      if (startedAt) {
+        waitingTime = new Date(startedAt).getTime() - new Date(createdAt).getTime();
+        executionTime = new Date(completedAt).getTime() - new Date(startedAt).getTime();
+      } else {
+        executionTime = totalTime;
+      }
+      hasTiming = totalTime > 0;
+    }
+
+    const data = {
+      total: 1,
+      [task.status]: 1
+    };
+    if (hasTiming) {
+      data.waitingTime = waitingTime;
+      data.executionTime = executionTime;
+      data.totalTime = totalTime;
+    }
+
+    fastify[`${options.name}Statistics`].services
+      .collect({
+        channel: `task:${task.type}:${task.runnerType || 'manual'}`,
+        data,
+        time: completedAt
+      })
+      .catch(e => {
+        fastify.log.error(`采集任务统计数据失败: ${e.message}`);
+      });
+  };
 
   const generateSignature = ({ secret, id, data }) => {
     const dataToSign = `${id}|${typeof data === 'string' ? data : JSON.stringify(data)}`;
@@ -23,7 +62,16 @@ module.exports = fp(async (fastify, options) => {
     return signature === expectedSignature;
   };
 
-  const create = async ({ userId, input, type, targetId, targetType, runnerType, delay, scriptName, options: currentOptions }) => {
+  const create = async ({ userId, input, type, targetId, targetType, runnerType, delay = 0, scriptName, priority = 0, parentTaskId, maxRetries = 0, options: currentOptions }) => {
+    if (typeof delay !== 'number' || delay < 0) {
+      throw new Error('delay 必须为非负数');
+    }
+    if (typeof priority !== 'number' || !Number.isInteger(priority)) {
+      throw new Error('priority 必须为整数');
+    }
+    if (typeof maxRetries !== 'number' || !Number.isInteger(maxRetries) || maxRetries < 0) {
+      throw new Error('maxRetries 必须为非负整数');
+    }
     if (typeof options.task[type] !== 'function') {
       throw new Error('未找到合法的任务声明');
     }
@@ -34,6 +82,9 @@ module.exports = fp(async (fastify, options) => {
       targetId,
       targetType,
       runnerType,
+      priority,
+      parentTaskId,
+      maxRetries,
       startTime: delay > 0 ? new Date(Date.now() + 1000 * delay) : new Date(),
       scriptName,
       options: currentOptions
@@ -54,10 +105,20 @@ module.exports = fp(async (fastify, options) => {
   };
 
   const executor = async ({ type, scriptName, ...props }) => {
-    const taskModulePath = path.resolve(options.dir, type, `${scriptName || options.scriptName}.js`);
-    if (!(await fs.exists(taskModulePath))) {
-      console.warn(`未匹配到任务执行器:${taskModulePath}`);
+    const scriptFile = `${scriptName || options.scriptName}.js`;
+    let taskModulePath = null;
+    for (const dir of options.dirs) {
+      const candidate = path.resolve(dir, type, scriptFile);
+      if (await fs.exists(candidate)) {
+        taskModulePath = candidate;
+        break;
+      }
     }
+    if (!taskModulePath) {
+      throw new Error(`未匹配到任务执行器:${type}/${scriptFile}，已搜索目录:${options.dirs.join(',')}`);
+    }
+    // 清除 require 缓存，确保运行期间模块更新后能加载最新版本
+    delete require.cache[taskModulePath];
     return await require(taskModulePath)(fastify, options, {
       ...props,
       updateProgress: async progress => {
@@ -140,7 +201,7 @@ module.exports = fp(async (fastify, options) => {
         error: result,
         completedAt: new Date()
       });
-      callFlushCompletionStatistics(task);
+      collectTaskStatistics(task);
       return;
     }
     await options.task[task.type]({ task, result: result.data, context: task.context });
@@ -150,54 +211,95 @@ module.exports = fp(async (fastify, options) => {
       progress: 100,
       completedAt: new Date()
     });
-    callFlushCompletionStatistics(task);
+    collectTaskStatistics(task);
   };
 
   const processSystemTask = async task => {
-    try {
-      await task.update({
-        status: 'running',
-        startedAt: new Date(),
-        progress: 0,
-        error: null,
-        output: null,
-        pollCount: 0,
-        pollResults: [],
-        completedAt: null,
-        context: {}
-      });
-      const addLog = props => {
-        return log(Object.assign({}, props, { taskId: task.id }));
-      };
-      executor({ type: task.type, scriptName: task.scriptName, task, log: addLog })
-        .then(async result => {
-          if (result === false) {
-            return;
-          }
-          await options.task[task.type]({ task, result, context: task.context });
+    await task.update({
+      status: 'running',
+      startedAt: new Date(),
+      progress: 0,
+      error: null,
+      output: null,
+      pollCount: 0,
+      pollResults: [],
+      completedAt: null,
+      context: {}
+    });
+    const addLog = props => {
+      return log(Object.assign({}, props, { taskId: task.id }));
+    };
+
+    // #3: 任务超时自动失败
+    const createTimeout = ms => new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`任务执行超时(${ms}ms)`)), ms)
+    );
+
+    const executorPromise = executor({ type: task.type, scriptName: task.scriptName, task, log: addLog });
+    const racePromise = options.taskTimeout > 0
+      ? Promise.race([executorPromise, createTimeout(options.taskTimeout)])
+      : executorPromise;
+
+    return racePromise
+      .then(async result => {
+        if (result === false) {
+          return;
+        }
+        await options.task[task.type]({ task, result, context: task.context });
+        await task.update({
+          status: 'success',
+          output: result,
+          progress: 100,
+          completedAt: new Date()
+        });
+        collectTaskStatistics(task);
+        // #2: 任务依赖/链式执行 — 父任务成功后激活子任务
+        await triggerChildTasks(task);
+      })
+      .catch(async e => {
+        // #4: 重试策略 — 判断是否自动重试
+        const currentRetryCount = (task.retryCount || 0) + 1;
+        const maxRetries = task.maxRetries || 0;
+        if (currentRetryCount < maxRetries) {
+          // 指数退避：baseDelay * 2^retryCount
+          const baseDelay = options.retryBaseDelay || 5000;
+          const backoffDelay = baseDelay * Math.pow(2, currentRetryCount - 1);
           await task.update({
-            status: 'success',
-            output: result,
-            progress: 100,
-            completedAt: new Date()
+            status: 'pending',
+            retryCount: currentRetryCount,
+            error: (e.stack || '').replaceAll(process.cwd(), '/server'),
+            startTime: new Date(Date.now() + backoffDelay),
+            completedAt: null
           });
-          callFlushCompletionStatistics(task);
-        })
-        .catch(async e => {
+          fastify.log.info(`任务 ${task.id} 第 ${currentRetryCount} 次重试，${backoffDelay}ms 后执行`);
+        } else {
           await task.update({
             status: 'failed',
             error: (e.stack || '').replaceAll(process.cwd(), '/server'),
-            completedAt: new Date()
+            completedAt: new Date(),
+            retryCount: currentRetryCount
           });
-          callFlushCompletionStatistics(task);
-        });
-    } catch (e) {
-      await task.update({
-        status: 'failed',
-        error: (e.stack || '').replaceAll(process.cwd(), '/server'),
-        completedAt: new Date()
+          collectTaskStatistics(task);
+        }
       });
-      callFlushCompletionStatistics(task);
+  };
+
+  // #2: 触发子任务（父任务成功后激活 pending 的子任务）
+  const triggerChildTasks = async parentTask => {
+    const childTasks = await models.task.findAll({
+      where: {
+        parentTaskId: parentTask.id,
+        status: 'pending'
+      }
+    });
+    if (childTasks.length === 0) return;
+
+    fastify.log.info(`父任务 ${parentTask.id} 完成，激活 ${childTasks.length} 个子任务`);
+    for (const child of childTasks) {
+      if (child.runnerType === 'system') {
+        await processSystemTask(child);
+      }
+      // manual 类型子任务保持 pending，等待手动执行
     }
   };
 
@@ -213,6 +315,7 @@ module.exports = fp(async (fastify, options) => {
       fastify.log.info(`当前运行中的系统任务数(${runningTaskCount})已达上限(${options.limit})，暂不执行新任务`);
       return;
     }
+    // #1: 按优先级降序 + startTime 升序获取待处理任务
     const pendingTasks = await models.task.findAll({
       where: {
         runnerType: 'system',
@@ -221,18 +324,16 @@ module.exports = fp(async (fastify, options) => {
           [Op.lte]: new Date()
         }
       },
-      limit: options.limit
-    });
-
-    const count = await models.task.count({
-      where: {
-        runnerType: 'system',
-        status: 'pending'
-      }
+      order: [
+        ['priority', 'DESC'],
+        ['startTime', 'ASC']
+      ],
+      limit: limit
     });
 
     if (pendingTasks.length > 0) {
-      fastify.log.info(`本轮执行 ${pendingTasks.length}/${count} 个待处理的系统任务`);
+      fastify.log.info(`本轮执行 ${pendingTasks.length} 个待处理的系统任务`);
+      // #8: await processSystemTask 返回的 Promise，防止同任务重复执行
       await Promise.all(pendingTasks.map(async task => processSystemTask(task)));
     }
   };
@@ -246,6 +347,9 @@ module.exports = fp(async (fastify, options) => {
   };
 
   const cancel = async ({ id, targetId, targetType, type }) => {
+    if (!id && !(targetId && targetType && type)) {
+      throw new Error('必须提供 id 或 targetId+targetType+type');
+    }
     if (targetId && targetType && type) {
       const bulkWhere = {
         targetId,
@@ -267,7 +371,7 @@ module.exports = fp(async (fastify, options) => {
         }
       );
       for (const row of tasksToCancel) {
-        callFlushCompletionStatistics(Object.assign({}, row, { status: 'canceled', completedAt }));
+        collectTaskStatistics(Object.assign({}, row, { status: 'canceled', completedAt }));
       }
       return affectedCount;
     }
@@ -280,15 +384,12 @@ module.exports = fp(async (fastify, options) => {
         status: 'canceled',
         completedAt: new Date()
       });
-      callFlushCompletionStatistics(task);
+      collectTaskStatistics(task);
     }
   };
 
   const complete = async ({ id, userId, output, ...props }) => {
     const task = await detail({ id });
-    if (!task) {
-      throw new Error('任务不存在');
-    }
     if (props.status === 'success') {
       try {
         await options.task[task.type]({ task, result: output });
@@ -300,7 +401,7 @@ module.exports = fp(async (fastify, options) => {
           startedAt: task.startedAt || task.createdAt,
           completedUserId: userId
         });
-        callFlushCompletionStatistics(task);
+        collectTaskStatistics(task);
       } catch (e) {
         await task.update(
           Object.assign({}, props, {
@@ -311,7 +412,7 @@ module.exports = fp(async (fastify, options) => {
             startedAt: task.startedAt || task.createdAt
           })
         );
-        callFlushCompletionStatistics(task);
+        collectTaskStatistics(task);
         throw e;
       }
     } else {
@@ -323,17 +424,16 @@ module.exports = fp(async (fastify, options) => {
           completedUserId: userId
         })
       );
-      callFlushCompletionStatistics(task);
+      collectTaskStatistics(task);
     }
   };
 
   const waitingComplete = async ({ id, pollInterval = 1000, maxPollTimes = 20 }) => {
     const task = await detail({ id });
-    if (!task) {
-      throw new Error('任务不存在');
-    }
 
     if (task.status === 'pending') {
+      // 标记为最高优先级，确保立即执行（即使因重试等重新入队也会被优先处理）
+      await task.update({ priority: Number.MAX_SAFE_INTEGER });
       await processSystemTask(task);
     }
 
@@ -391,7 +491,7 @@ module.exports = fp(async (fastify, options) => {
     }
   };
 
-  const list = async ({ filter, perPage, currentPage, sort }) => {
+  const list = async ({ filter, perPage = 20, currentPage = 1, sort }) => {
     const whereQuery = {};
 
     ['id', 'targetId', 'type', 'status', 'runnerType'].forEach(key => {
@@ -417,22 +517,18 @@ module.exports = fp(async (fastify, options) => {
       whereQuery.completedAt = getTimeQuery(filter.completedAt);
     }
 
-    // 处理sort排序
-    let orderBy = 'createdAt';
-    let orderDirection = 'DESC';
+    // 处理sort排序：支持多字段排序
+    let order = [['createdAt', 'DESC']];
 
     if (sort && Object.keys(sort).length > 0) {
-      Object.keys(sort).forEach(key => {
-        orderBy = key;
-        orderDirection = sort[key];
-      });
+      order = Object.entries(sort).map(([key, direction]) => [key, direction]);
     }
 
     const { rows, count } = await models.task.findAndCountAll({
       where: Object.assign({}, whereQuery),
       offset: perPage * (currentPage - 1),
       limit: perPage,
-      order: [[orderBy, orderDirection]]
+      order: order
     });
 
     return {
@@ -449,7 +545,9 @@ module.exports = fp(async (fastify, options) => {
     await task.update({
       status: 'pending',
       completedAt: null,
-      completedUserId: null
+      completedUserId: null,
+      retryCount: 0,
+      error: null
     });
   };
 
@@ -467,9 +565,6 @@ module.exports = fp(async (fastify, options) => {
   const log = async ({ id, taskId, data, message = '' }) => {
     const targetId = id || taskId;
     const task = await detail({ id: targetId });
-    if (!task) {
-      throw new Error('任务不存在');
-    }
 
     const currentOptions = task.options || {};
     const logs = (currentOptions.logs || []).slice(0);
@@ -494,9 +589,6 @@ module.exports = fp(async (fastify, options) => {
   const logWithSignature = async ({ id, taskId, data, message = '', signature }) => {
     const targetId = id || taskId;
     const task = await detail({ id: targetId });
-    if (!task) {
-      throw new Error('任务不存在');
-    }
 
     if (task.context?.secret && !verifySignature({ secret: task.context.secret, id: targetId, data: { data, message }, signature })) {
       throw new Error('签名验证失败');
@@ -506,10 +598,7 @@ module.exports = fp(async (fastify, options) => {
   };
 
   const callback = async ({ id, code, data, message }) => {
-    const task = await detail({ id });
-    if (!task) {
-      throw new Error('任务不存在');
-    }
+    await detail({ id });
 
     const result = { code, data, message };
     await log({ id, message: '回调结果', data: JSON.stringify(result) });
@@ -532,15 +621,39 @@ module.exports = fp(async (fastify, options) => {
 
   const callbackWithSignature = async ({ id, code, data, message, signature }) => {
     const task = await detail({ id });
-    if (!task) {
-      throw new Error('任务不存在');
-    }
 
     if (task.context?.secret && !verifySignature({ secret: task.context.secret, id, data: { code, data, message }, signature })) {
       throw new Error('签名验证失败');
     }
 
     return callback({ id, code, data, message });
+  };
+
+  const append = async ({ dirs, tasks }) => {
+    const result = { dirs: [], tasks: [] };
+    if (Array.isArray(dirs)) {
+      for (const dir of dirs) {
+        if (!options.dirs.includes(dir)) {
+          if (!(await fs.exists(dir))) {
+            console.warn(`append 目录不存在:${dir}，仍会添加但运行时可能无法匹配任务执行器`);
+          }
+          options.dirs.push(dir);
+          result.dirs.push(dir);
+        }
+      }
+    }
+    if (tasks && typeof tasks === 'object') {
+      Object.entries(tasks).forEach(([type, handler]) => {
+        if (typeof handler !== 'function') {
+          throw new Error(`任务 ${type} 的 handler 必须是一个函数`);
+        }
+        if (typeof options.task[type] !== 'function') {
+          options.task[type] = handler;
+          result.tasks.push(type);
+        }
+      });
+    }
+    return result;
   };
 
   Object.assign(fastify[options.name].services, {
@@ -559,6 +672,7 @@ module.exports = fp(async (fastify, options) => {
     executor,
     processNext,
     processSystemTask,
-    waitingComplete
+    waitingComplete,
+    append
   });
 });
