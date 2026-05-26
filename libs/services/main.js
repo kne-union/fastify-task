@@ -32,35 +32,26 @@ module.exports = fp(async (fastify, options) => {
       hasTiming = totalTime > 0;
     }
 
-    const channel = `task:${task.type}:${task.runnerType || 'manual'}`;
+    const hour = new Date(completedAt).getUTCHours();
+    const channel = `${task.type}:${task.runnerType || 'manual'}:${hour}`;
     const status = task.status || 'unknown';
 
-    // 分两次采集：计数指标和时长指标，避免聚合时不同语义的值混在一起
-    const countData = { total: 1, [status]: 1 };
+    const data = { total: 1, [status]: 1 };
+    const unit = { total: 'count', [status]: 'count' };
+    if (hasTiming) {
+      Object.assign(data, { waitingTime, executionTime, totalTime });
+      Object.assign(unit, { waitingTime: 'ms', executionTime: 'ms', totalTime: 'ms' });
+    }
     fastify[`${options.name}Statistics`].services
       .collect({
         channel,
-        data: countData,
-        unit: 'count',
+        data,
+        unit,
         time: completedAt
       })
       .catch(e => {
         fastify.log.error(`采集任务统计数据失败: ${e.message}`);
       });
-
-    if (hasTiming) {
-      const timingData = { waitingTime, executionTime, totalTime };
-      fastify[`${options.name}Statistics`].services
-        .collect({
-          channel,
-          data: timingData,
-          unit: 'ms',
-          time: completedAt
-        })
-        .catch(e => {
-          fastify.log.error(`采集任务统计数据失败: ${e.message}`);
-        });
-    }
   };
 
   const generateSignature = ({ secret, id, data }) => {
