@@ -1,4 +1,10 @@
 const fp = require('fastify-plugin');
+const dayjs = require('dayjs');
+const utc = require('dayjs/plugin/utc');
+const timezone = require('dayjs/plugin/timezone');
+
+dayjs.extend(utc);
+dayjs.extend(timezone);
 
 const RANGE_MAP = {
   '7d': { value: 7, unit: 'day', label: '近7天' },
@@ -10,22 +16,33 @@ const RANGE_MAP = {
 const RUNNER_TYPES = ['system', 'manual'];
 const STAT_ATTRS = ['total', 'success', 'failed', 'canceled', 'waitingTime', 'executionTime', 'totalTime'];
 
-const parseRange = (range = '7d') => {
+// 查询用客户端时间：parseRange 使用客户端时区计算日期范围
+const parseRange = (range = '7d', tz) => {
   const config = RANGE_MAP[range];
   if (!config) {
     throw new Error(`不支持的时间范围: ${range}, 支持: ${Object.keys(RANGE_MAP).join(',')}`);
   }
-  const now = new Date();
-  const startTime = new Date(now);
-  if (config.unit === 'day') startTime.setDate(startTime.getDate() - config.value);
-  else if (config.unit === 'month') startTime.setMonth(startTime.getMonth() - config.value);
-  else if (config.unit === 'year') startTime.setFullYear(startTime.getFullYear() - config.value);
-  return { startTime, endTime: now, label: config.label, range };
+  // 写入数据全使用服务器时间，查询用客户端时间
+  // 使用客户端时区计算"现在"和"起始时间"，确保日期边界对齐客户端视角
+  const now = tz ? dayjs().tz(tz) : dayjs();
+  const unitStartMap = { day: 'day', month: 'month', year: 'year' };
+  const startUnit = unitStartMap[config.unit];
+  const startTime = startUnit
+    ? now.subtract(config.value, startUnit).startOf(startUnit)
+    : now.subtract(config.value, config.unit);
+  return { startTime: startTime.toDate(), endTime: now.toDate(), label: config.label, range };
 };
 
-const formatDate = date => {
-  const d = new Date(date);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+// 查询用客户端时间：formatDate 使用客户端时区格式化日期
+const formatDate = (date, tz) => {
+  const d = tz ? dayjs(date).tz(tz) : dayjs(date);
+  return d.format('YYYY-MM-DD');
+};
+
+// 查询用客户端时间：提取客户端时区下的小时
+const getHour = (date, tz) => {
+  const d = tz ? dayjs(date).tz(tz) : dayjs(date);
+  return d.hour();
 };
 
 const safeNum = v => {
@@ -91,14 +108,15 @@ const createDailyDurationEntry = () => ({
 });
 
 // 查询 statistics 并解析结果
-const queryAndParse = async (statisticsServices, { channels, startTime, endTime, timezone, runnerType: runnerTypeFilter }) => {
+// 写入数据全使用服务器时间（DB 中存储的是服务器时间），查询用客户端时间转换展示
+const queryAndParse = async (statisticsServices, { channels, startTime, endTime, timezone: tz, runnerType: runnerTypeFilter }) => {
   if (channels.length === 0) return null;
 
   const statResult = await statisticsServices.query({
     channels, startTime, endTime,
     attributeNames: STAT_ATTRS,
     aggregates: ['sum'],
-    timezone: timezone || undefined
+    timezone: tz || undefined
   });
 
   const result = {
@@ -128,8 +146,9 @@ const queryAndParse = async (statisticsServices, { channels, startTime, endTime,
     const sum = getSumData(item);
     const count = safeNum(sum.total);
     const isHourly = item.period === 'h';
-    const date = formatDate(item.time);
-    const hour = isHourly ? new Date(item.time).getHours() : null;
+    // 查询用客户端时间：日期和小时使用客户端时区转换
+    const date = formatDate(item.time, tz);
+    const hour = isHourly ? getHour(item.time, tz) : null;
 
     // ─── 1-segment channel: 全局 + 按日 + 时长 聚合 ───
     if (!runnerTypeName) {
@@ -144,7 +163,7 @@ const queryAndParse = async (statisticsServices, { channels, startTime, endTime,
       result.duration.completedCount += count;
       result.duration.successCount += safeNum(sum.success);
       result.duration.failedCount += safeNum(sum.failed);
-      result.duration.canceledCount += safeNum(sum.canceled);
+      result.duration.canceled += safeNum(sum.canceled);
       result.duration.sumWaiting += safeNum(sum.waitingTime);
       result.duration.sumExecution += safeNum(sum.executionTime);
       result.duration.sumTotal += safeNum(sum.totalTime);
@@ -348,7 +367,8 @@ module.exports = fp(async (fastify, options) => {
 
   // ─── queryStatistics (history 接口) ───
   const queryStatistics = async ({ range = '7d', timezone, type, runnerType }) => {
-    const { startTime, endTime, label, range: rangeKey } = parseRange(range);
+    // 查询用客户端时间：parseRange 传入 timezone
+    const { startTime, endTime, label, range: rangeKey } = parseRange(range, timezone);
     const emptyResult = {
       range: rangeKey, rangeLabel: label,
       totalTasks: 0, byStatus: {}, byType: {}, byRunnerType: {},
@@ -380,11 +400,12 @@ module.exports = fp(async (fastify, options) => {
   };
 
   // ─── buildSseData (SSE 接口) ───
-  const buildSseData = async ({ timezone, type, runnerType }) => {
-    const now = new Date();
-    const todayStart = new Date(now); todayStart.setHours(0, 0, 0, 0);
-    const todayEnd = new Date(now); todayEnd.setHours(23, 59, 59, 999);
-    const todayStr = formatDate(now);
+  const buildSseData = async ({ timezone: tz, type, runnerType }) => {
+    // 查询用客户端时间："今天"的边界使用客户端时区
+    const now = tz ? dayjs().tz(tz) : dayjs();
+    const todayStart = now.startOf('day').toDate();
+    const todayEnd = now.endOf('day').toDate();
+    const todayStr = now.format('YYYY-MM-DD');
 
     // 统计查询：正在执行和等待执行的数量 + DB 查询
     const [runnerTypeStatusRows, waitingTasks] = await Promise.all([
@@ -462,7 +483,7 @@ module.exports = fp(async (fastify, options) => {
 
     try {
       const channels = await buildChannels(statisticsServices, type, runnerType);
-      const parsed = await queryAndParse(statisticsServices, { channels, startTime: todayStart, endTime: todayEnd, timezone, runnerType });
+      const parsed = await queryAndParse(statisticsServices, { channels, startTime: todayStart, endTime: todayEnd, timezone: tz, runnerType });
       if (parsed) {
         totalTasks = parsed.totalTasks + dbStatusCount.running + dbWaitingTotal;
         byStatus = { ...parsed.byStatus, running: dbStatusCount.running, waiting: dbWaitingTotal, pending: 0 };
@@ -500,9 +521,8 @@ module.exports = fp(async (fastify, options) => {
     }
 
     // 补充当前小时的 running/waiting 瞬时状态（来自 DB 实时查询，不受 statistics 服务影响）
-    // 放在 try/catch 之后，确保无论 parsed 是否存在都能追加 DB 实时数据
-    // pending 已合并到 waiting，前端不单独展示 pending
-    const currentHour = now.getHours();
+    // 查询用客户端时间：当前小时使用客户端时区
+    const currentHour = now.hour();
     if (dbStatusCount.running > 0) hourlyTrendByStatus.push({ hour: currentHour, status: 'running', count: dbStatusCount.running });
     if (dbWaitingTotal > 0) hourlyTrendByStatus.push({ hour: currentHour, status: 'waiting', count: dbWaitingTotal });
 
