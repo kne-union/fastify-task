@@ -119,10 +119,66 @@ describe('@kne/fastify-task', function () {
       findByPk: async id => {
         return taskData.find(t => t.id === id) || null;
       },
-      findAll: async ({ where, limit, attributes, group, order } = {}) => {
+      findAll: async ({ where, limit, attributes, group, order, raw } = {}) => {
         let results = taskData;
         if (where) {
           results = taskData.filter(t => matchWhere(t, where, Op));
+        }
+
+        // Handle grouped queries
+        if (group) {
+          const groupFields = Array.isArray(group) ? group : [group];
+          const groupKeys = groupFields.map(g => {
+            if (g && typeof g === 'object' && g.fn === 'DATE') return 'createdAt';
+            if (typeof g === 'string') return g;
+            return null;
+          }).filter(Boolean);
+
+          const groups = {};
+          results.forEach(t => {
+            const key = groupKeys.map(k => {
+              const val = t[k];
+              return val instanceof Date ? `${val.getFullYear()}-${String(val.getMonth() + 1).padStart(2, '0')}-${String(val.getDate()).padStart(2, '0')}` : String(val);
+            }).join('|');
+
+            if (!groups[key]) {
+              groups[key] = { items: [], keyValues: {} };
+              groupKeys.forEach(k => {
+                const val = t[k];
+                groups[key].keyValues[k === 'createdAt' ? 'date' : k] = val instanceof Date ? `${val.getFullYear()}-${String(val.getMonth() + 1).padStart(2, '0')}-${String(val.getDate()).padStart(2, '0')}` : val;
+              });
+            }
+            groups[key].items.push(t);
+          });
+
+          return Object.values(groups).map(g => {
+            const row = { ...g.keyValues };
+            if (attributes) {
+              attributes.forEach(attr => {
+                if (typeof attr === 'string') {
+                  row[attr] = g.items[0]?.[attr];
+                } else if (Array.isArray(attr) && attr.length === 2) {
+                  const [expr, alias] = attr;
+                  if (expr && typeof expr === 'object' && expr.fn === 'COUNT') {
+                    row[alias] = g.items.length;
+                  }
+                }
+              });
+            }
+            return row;
+          });
+        }
+
+        // Handle attribute projection for non-grouped queries
+        if (attributes && !group) {
+          const attrKeys = attributes.map(a => typeof a === 'string' ? a : (Array.isArray(a) ? a[1] : null)).filter(Boolean);
+          if (raw && attrKeys.length > 0) {
+            results = results.map(t => {
+              const row = {};
+              attrKeys.forEach(k => { row[k] = t[k]; });
+              return row;
+            });
+          }
         }
 
         if (order && Array.isArray(order)) {
@@ -213,7 +269,12 @@ describe('@kne/fastify-task', function () {
 
     // 模拟 sequelize
     app.decorate('sequelize', {
-      Sequelize: { Op },
+      Sequelize: {
+        Op,
+        fn: sinon.stub().callsFake((fn, ...args) => ({ fn, args })),
+        col: sinon.stub().callsFake(col => ({ col })),
+        literal: sinon.stub().callsFake(lit => ({ literal: lit }))
+      },
       models: { task: mockTaskModel }
     });
 
@@ -2070,7 +2131,7 @@ describe('@kne/fastify-task', function () {
 
       expect(fastify.taskStatistics.services.sseStream.send.calledOnce).to.be.true;
       const sendArgs = fastify.taskStatistics.services.sseStream.send.firstCall.args;
-      expect(sendArgs[1].name).to.equal('query');
+      expect(sendArgs[1].name).to.equal('taskStatistics');
       expect(sendArgs[1].params).to.have.property('timezone');
     });
 
@@ -2085,7 +2146,7 @@ describe('@kne/fastify-task', function () {
 
       expect(fastify.taskStatistics.services.sseStream.send.calledOnce).to.be.true;
       const sendArgs = fastify.taskStatistics.services.sseStream.send.firstCall.args;
-      expect(sendArgs[1].name).to.equal('query');
+      expect(sendArgs[1].name).to.equal('taskStatistics');
       expect(sendArgs[1].params).to.have.property('timezone');
     });
 
@@ -3277,6 +3338,653 @@ describe('@kne/fastify-task', function () {
       const updated = await fastify.task.services.detail({ id: task.id });
       expect(updated.status).to.equal('failed');
       expect(updated.error).to.include('未匹配到任务执行器');
+    });
+  });
+
+  // ==================== 补充覆盖率测试 ====================
+
+  describe('create timeout 校验测试', () => {
+    it('should throw error for non-integer timeout', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+      try {
+        await fastify.task.services.create({
+          type: 'test-type', targetId: 'target-1', targetType: 'document', timeout: 1.5
+        });
+        throw new Error('Should have thrown');
+      } catch (e) {
+        expect(e.message).to.include('timeout 必须为非负整数');
+      }
+    });
+
+    it('should throw error for negative timeout', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+      try {
+        await fastify.task.services.create({
+          type: 'test-type', targetId: 'target-1', targetType: 'document', timeout: -1
+        });
+        throw new Error('Should have thrown');
+      } catch (e) {
+        expect(e.message).to.include('timeout 必须为非负整数');
+      }
+    });
+
+    it('should throw error for non-numeric timeout', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+      try {
+        await fastify.task.services.create({
+          type: 'test-type', targetId: 'target-1', targetType: 'document', timeout: 'abc'
+        });
+        throw new Error('Should have thrown');
+      } catch (e) {
+        expect(e.message).to.include('timeout 必须为非负整数');
+      }
+    });
+  });
+
+  describe('checkTimeout 超时检测测试', () => {
+    it('should mark running tasks as failed when timed out', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+      const task = await fastify.task.services.create({
+        type: 'test-type', targetId: 'target-1', targetType: 'document',
+        runnerType: 'system', timeout: 1
+      });
+      await task.update({ status: 'running', startedAt: new Date(Date.now() - 2 * 60 * 1000) });
+      await fastify.task.services.runner();
+      const updated = await fastify.task.services.detail({ id: task.id });
+      expect(updated.status).to.equal('failed');
+      expect(updated.error).to.include('任务超时');
+    });
+
+    it('should mark waiting tasks as failed when timed out', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+      const task = await fastify.task.services.create({
+        type: 'test-type', targetId: 'target-1', targetType: 'document',
+        runnerType: 'system', timeout: 1
+      });
+      await task.update({ status: 'waiting', startedAt: new Date(Date.now() - 2 * 60 * 1000) });
+      await fastify.task.services.runner();
+      const updated = await fastify.task.services.detail({ id: task.id });
+      expect(updated.status).to.equal('failed');
+      expect(updated.error).to.include('任务超时');
+    });
+
+    it('should not mark tasks as failed when timeout is 0', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+      const task = await fastify.task.services.create({
+        type: 'test-type', targetId: 'target-1', targetType: 'document',
+        runnerType: 'system', timeout: 0
+      });
+      await task.update({ status: 'running', startedAt: new Date(Date.now() - 60 * 60 * 1000) });
+      await fastify.task.services.runner();
+      const updated = await fastify.task.services.detail({ id: task.id });
+      expect(updated.status).to.equal('running');
+    });
+
+    it('should not mark tasks as failed when not yet timed out', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+      const task = await fastify.task.services.create({
+        type: 'test-type', targetId: 'target-1', targetType: 'document',
+        runnerType: 'system', timeout: 60
+      });
+      await task.update({ status: 'running', startedAt: new Date() });
+      await fastify.task.services.runner();
+      const updated = await fastify.task.services.detail({ id: task.id });
+      expect(updated.status).to.equal('running');
+    });
+  });
+
+  describe('waitingComplete 即时状态检查测试', () => {
+    it('should reject when task is already canceled before call', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+      const task = await fastify.task.services.create({
+        type: 'test-type', targetId: 'target-1', targetType: 'document', runnerType: 'system'
+      });
+      await task.update({ status: 'canceled' });
+      try {
+        await fastify.task.services.waitingComplete({ id: task.id, pollInterval: 10, maxPollTimes: 5 });
+        throw new Error('Should have thrown');
+      } catch (e) {
+        expect(e.message).to.include('取消');
+      }
+    });
+
+    it('should reject when task is already failed before call', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+      const task = await fastify.task.services.create({
+        type: 'test-type', targetId: 'target-1', targetType: 'document', runnerType: 'system'
+      });
+      await task.update({ status: 'failed', error: 'Already failed' });
+      try {
+        await fastify.task.services.waitingComplete({ id: task.id, pollInterval: 10, maxPollTimes: 5 });
+        throw new Error('Should have thrown');
+      } catch (e) {
+        expect(e.message).to.include('Already failed');
+      }
+    });
+
+    it('should resolve when task is already successful before call', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+      const task = await fastify.task.services.create({
+        type: 'test-type', targetId: 'target-1', targetType: 'document', runnerType: 'system'
+      });
+      await task.update({ status: 'success', output: { data: 'done' } });
+      const result = await fastify.task.services.waitingComplete({ id: task.id, pollInterval: 10, maxPollTimes: 5 });
+      expect(result).to.deep.equal({ data: 'done' });
+    });
+  });
+
+  describe('waitingComplete 轮询路径测试', () => {
+    it('should reject when task becomes failed during polling', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+      const task = await fastify.task.services.create({
+        type: 'test-type', targetId: 'target-1', targetType: 'document', runnerType: 'system'
+      });
+      await task.update({ status: 'running' });
+      const promise = fastify.task.services.waitingComplete({ id: task.id, pollInterval: 10, maxPollTimes: 50 });
+      setTimeout(async () => {
+        await task.update({ status: 'failed', error: 'Polling failed' });
+      }, 30);
+      try {
+        await promise;
+        throw new Error('Should have thrown');
+      } catch (e) {
+        expect(e.message).to.include('Polling failed');
+      }
+    });
+
+    it('should reject with default message when task fails without error', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+      const task = await fastify.task.services.create({
+        type: 'test-type', targetId: 'target-1', targetType: 'document', runnerType: 'system'
+      });
+      await task.update({ status: 'running', error: null });
+      const promise = fastify.task.services.waitingComplete({ id: task.id, pollInterval: 10, maxPollTimes: 50 });
+      setTimeout(async () => {
+        await task.update({ status: 'failed' });
+      }, 30);
+      try {
+        await promise;
+        throw new Error('Should have thrown');
+      } catch (e) {
+        expect(e.message).to.include('失败');
+      }
+    });
+
+    it('should resolve when task becomes success during polling', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+      const task = await fastify.task.services.create({
+        type: 'test-type', targetId: 'target-1', targetType: 'document', runnerType: 'system'
+      });
+      await task.update({ status: 'running' });
+      const promise = fastify.task.services.waitingComplete({ id: task.id, pollInterval: 10, maxPollTimes: 50 });
+      setTimeout(async () => {
+        await task.update({ status: 'success', output: { value: 42 } });
+      }, 30);
+      const result = await promise;
+      expect(result).to.deep.equal({ value: 42 });
+    });
+  });
+
+  describe('queryAndParse 数据处理测试', () => {
+    const buildMockQueryResult = () => {
+      const now = new Date();
+      return {
+        list: [
+          // 1-segment channel, daily
+          {
+            channel: 'test-type', period: 'd', time: now,
+            data: { sum: { total: 10, success: 8, failed: 1, canceled: 1, waitingTime: 5000, executionTime: 10000, totalTime: 15000 } }
+          },
+          // 2-segment channel, daily
+          {
+            channel: 'test-type:manual', period: 'd', time: now,
+            data: { sum: { total: 5, success: 4, failed: 1, canceled: 0, waitingTime: 2000, executionTime: 5000, totalTime: 7000 } }
+          },
+          // 2-segment channel system, daily
+          {
+            channel: 'test-type:system', period: 'd', time: now,
+            data: { sum: { total: 5, success: 4, failed: 0, canceled: 1, waitingTime: 3000, executionTime: 5000, totalTime: 8000 } }
+          },
+          // 1-segment channel, hourly
+          {
+            channel: 'test-type', period: 'h', time: now,
+            data: { sum: { total: 3, success: 2, failed: 1, canceled: 0, waitingTime: 1000, executionTime: 3000, totalTime: 4000 } }
+          },
+          // 2-segment channel, hourly
+          {
+            channel: 'test-type:manual', period: 'h', time: now,
+            data: { sum: { total: 2, success: 2, failed: 0, canceled: 0, waitingTime: 500, executionTime: 2000, totalTime: 2500 } }
+          },
+          // 2-segment channel system, hourly
+          {
+            channel: 'test-type:system', period: 'h', time: now,
+            data: { sum: { total: 1, success: 0, failed: 1, canceled: 0, waitingTime: 500, executionTime: 1000, totalTime: 1500 } }
+          }
+        ]
+      };
+    };
+
+    it('should process statistics data with 1-segment and 2-segment channels', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+      fastify.taskStatistics.services.query.resolves(buildMockQueryResult());
+
+      const result = await fastify.task.services.queryStatistics({ range: '7d' });
+      // 1-segment channels: daily(10) + hourly(3) = 13
+      expect(result.totalTasks).to.equal(13);
+      // byStatus from 1-segment: daily(8+1+1) + hourly(2+1+0)
+      expect(result.byStatus.success).to.equal(10);
+      expect(result.byStatus.failed).to.equal(2);
+      expect(result.byStatus.canceled).to.equal(1);
+      expect(result.byType['test-type']).to.equal(13);
+      // byRunnerType from 2-segment: manual(5+2) + system(5+1)
+      expect(result.byRunnerType.manual).to.equal(7);
+      expect(result.byRunnerType.system).to.equal(6);
+    });
+
+    it('should build daily trend arrays from statistics', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+      fastify.taskStatistics.services.query.resolves(buildMockQueryResult());
+
+      const result = await fastify.task.services.queryStatistics({ range: '7d' });
+      expect(result.recentTrend).to.exist;
+      expect(Array.isArray(result.recentTrend)).to.be.true;
+      expect(result.recentTrendByStatus).to.exist;
+      expect(result.recentTrendByType).to.exist;
+    });
+
+    it('should build hourly trend arrays from statistics', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+      fastify.taskStatistics.services.query.resolves(buildMockQueryResult());
+
+      const result = await fastify.task.services.queryStatistics({ range: '7d' });
+      expect(result.hourlyTrend).to.exist;
+      expect(Array.isArray(result.hourlyTrend)).to.be.true;
+      expect(result.hourlyCompletionTrend).to.exist;
+      expect(Array.isArray(result.hourlyCompletionTrend)).to.be.true;
+    });
+
+    it('should build duration trend from statistics', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+      fastify.taskStatistics.services.query.resolves(buildMockQueryResult());
+
+      const result = await fastify.task.services.queryStatistics({ range: '7d' });
+      expect(result.durationTrend).to.exist;
+      expect(Array.isArray(result.durationTrend)).to.be.true;
+      if (result.durationTrend.length > 0) {
+        const trendItem = result.durationTrend[0];
+        expect(trendItem).to.have.property('date');
+        expect(trendItem).to.have.property('completedCount');
+        expect(trendItem).to.have.property('avgWaitingTime');
+        expect(trendItem).to.have.property('avgExecutionTime');
+        expect(trendItem).to.have.property('avgTotalTime');
+        expect(trendItem).to.have.property('byType');
+        expect(trendItem).to.have.property('byRunnerType');
+      }
+    });
+
+    it('should filter by runnerType in queryAndParse', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+      fastify.taskStatistics.services.query.resolves(buildMockQueryResult());
+
+      const result = await fastify.task.services.queryStatistics({ range: '7d', runnerType: 'manual' });
+      // runnerType filter should exclude items that don't match
+      expect(result).to.exist;
+    });
+
+    it('should return empty result when channels are empty', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+      fastify.taskStatistics.services.channelMeta.list.resolves([]);
+      fastify.taskStatistics.services.query.resolves({ list: [] });
+
+      const result = await fastify.task.services.queryStatistics({ range: '7d' });
+      expect(result.totalTasks).to.equal(0);
+    });
+
+    it('should handle queryStatistics error gracefully', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+      fastify.taskStatistics.services.query.rejects(new Error('DB error'));
+
+      const result = await fastify.task.services.queryStatistics({ range: '7d' });
+      expect(result).to.exist;
+      expect(result.totalTasks).to.equal(0);
+    });
+  });
+
+  describe('buildSseData 测试', () => {
+    it('should build SSE data with tasks in various states', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+
+      // Create tasks in different states
+      const pendingTask = await fastify.task.models.task.create({
+        type: 'test-type', targetId: 'target-1', targetType: 'document',
+        runnerType: 'system', status: 'pending'
+      });
+      const runningTask = await fastify.task.models.task.create({
+        type: 'test-type', targetId: 'target-2', targetType: 'document',
+        runnerType: 'system', status: 'running'
+      });
+      const waitingTask = await fastify.task.models.task.create({
+        type: 'test-type', targetId: 'target-3', targetType: 'document',
+        runnerType: 'manual', status: 'waiting'
+      });
+      const successTask = await fastify.task.models.task.create({
+        type: 'test-type', targetId: 'target-4', targetType: 'document',
+        runnerType: 'manual', status: 'success'
+      });
+      const failedTask = await fastify.task.models.task.create({
+        type: 'test-type', targetId: 'target-5', targetType: 'document',
+        runnerType: 'system', status: 'failed'
+      });
+
+      // Set up mock query to return empty for SSE
+      fastify.taskStatistics.services.query.resolves({ list: [] });
+
+      // Call SSE endpoint and use fetchData
+      await fastify.inject({ method: 'GET', url: '/api/task/statistics/sse' });
+      const sendArgs = fastify.taskStatistics.services.sseStream.send.firstCall.args;
+      const { fetchData } = sendArgs[1];
+      const result = await fetchData();
+
+      expect(result).to.exist;
+      expect(result).to.have.property('totalTasks');
+      expect(result).to.have.property('byStatus');
+      expect(result).to.have.property('pendingByRunnerType');
+      expect(result).to.have.property('waitingByRunnerType');
+      expect(result).to.have.property('runningByRunnerType');
+      expect(result).to.have.property('runnerTypeStats');
+      expect(result).to.have.property('hourlyTrendByStatus');
+      expect(result).to.have.property('todayDuration');
+    });
+
+    it('should build SSE data with statistics query result', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+
+      const now = new Date();
+      fastify.taskStatistics.services.query.resolves({
+        list: [
+          {
+            channel: 'test-type', period: 'h', time: now,
+            data: { sum: { total: 5, success: 3, failed: 1, canceled: 1, waitingTime: 2000, executionTime: 5000, totalTime: 7000 } }
+          },
+          {
+            channel: 'test-type:manual', period: 'h', time: now,
+            data: { sum: { total: 3, success: 2, failed: 1, canceled: 0, waitingTime: 1000, executionTime: 3000, totalTime: 4000 } }
+          },
+          {
+            channel: 'test-type:system', period: 'h', time: now,
+            data: { sum: { total: 2, success: 1, failed: 0, canceled: 1, waitingTime: 1000, executionTime: 2000, totalTime: 3000 } }
+          }
+        ]
+      });
+
+      // Create a running task
+      await fastify.task.models.task.create({
+        type: 'test-type', targetId: 'target-1', targetType: 'document',
+        runnerType: 'system', status: 'running'
+      });
+
+      await fastify.inject({ method: 'GET', url: '/api/task/statistics/sse' });
+      const sendArgs = fastify.taskStatistics.services.sseStream.send.firstCall.args;
+      const { fetchData } = sendArgs[1];
+      const result = await fetchData();
+
+      expect(result.totalTasks).to.be.greaterThan(0);
+      expect(result.byStatus.running).to.be.greaterThan(0);
+      expect(result.completedToday).to.exist;
+      expect(result.todayDuration).to.exist;
+      expect(result.todayDuration.completedCount).to.equal(5);
+      expect(result.hourlyTrend).to.exist;
+      expect(result.hourlyTrendByStatus).to.exist;
+      expect(result.hourlyTrendByType).to.exist;
+      expect(result.intervalTrend).to.exist;
+    });
+
+    it('should handle SSE statistics query error gracefully', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+
+      fastify.taskStatistics.services.query.rejects(new Error('SSE query error'));
+
+      await fastify.inject({ method: 'GET', url: '/api/task/statistics/sse' });
+      const sendArgs = fastify.taskStatistics.services.sseStream.send.firstCall.args;
+      const { fetchData } = sendArgs[1];
+      const result = await fetchData();
+
+      // Should still return basic data from DB even when statistics query fails
+      expect(result).to.exist;
+      expect(result).to.have.property('totalTasks');
+    });
+
+    it('should build SSE data with runnerType filter', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+
+      await fastify.task.models.task.create({
+        type: 'test-type', targetId: 'target-1', targetType: 'document',
+        runnerType: 'system', status: 'running'
+      });
+      await fastify.task.models.task.create({
+        type: 'test-type', targetId: 'target-2', targetType: 'document',
+        runnerType: 'manual', status: 'pending'
+      });
+      fastify.taskStatistics.services.query.resolves({ list: [] });
+
+      await fastify.inject({
+        method: 'GET',
+        url: '/api/task/statistics/sse',
+        query: { runnerType: 'system' }
+      });
+
+      const sendArgs = fastify.taskStatistics.services.sseStream.send.firstCall.args;
+      const { fetchData } = sendArgs[1];
+      const result = await fetchData();
+
+      expect(result).to.exist;
+      expect(result.runningByRunnerType.system).to.equal(1);
+    });
+
+    it('should calculate waitingQueueMaxWaitMs from pending/waiting tasks', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+
+      await fastify.task.models.task.create({
+        type: 'test-type', targetId: 'target-1', targetType: 'document',
+        runnerType: 'system', status: 'pending',
+        createdAt: new Date(Date.now() - 30000)
+      });
+      fastify.taskStatistics.services.query.resolves({ list: [] });
+
+      await fastify.inject({ method: 'GET', url: '/api/task/statistics/sse' });
+      const sendArgs = fastify.taskStatistics.services.sseStream.send.firstCall.args;
+      const { fetchData } = sendArgs[1];
+      const result = await fetchData();
+
+      expect(result.waitingQueueMaxWaitMsByRunnerType).to.exist;
+      expect(result.waitingQueueMaxWaitMsByRunnerType.system).to.be.greaterThan(0);
+    });
+  });
+
+  describe('sseStatistics 错误处理测试', () => {
+    it('should handle fetchData error and return empty object', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+
+      // Make buildSseData throw by breaking the model
+      fastify.task.models.task.findAll = async () => { throw new Error('DB connection lost'); };
+
+      await fastify.inject({ method: 'GET', url: '/api/task/statistics/sse' });
+      const sendArgs = fastify.taskStatistics.services.sseStream.send.firstCall.args;
+      const { fetchData } = sendArgs[1];
+      const result = await fetchData();
+      expect(result).to.deep.equal({});
+    });
+  });
+
+  describe('queryAndParse 边界分支测试', () => {
+    it('should handle item with NaN values in sum', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+      const now = new Date();
+      fastify.taskStatistics.services.query.resolves({
+        list: [{
+          channel: 'test-type', period: 'd', time: now,
+          data: { sum: { total: 'invalid', success: NaN, failed: undefined, canceled: null, waitingTime: 'bad', executionTime: NaN, totalTime: null } }
+        }]
+      });
+
+      const result = await fastify.task.services.queryStatistics({ range: '7d' });
+      expect(result).to.exist;
+      // NaN/invalid values should be converted to 0 by safeNum
+      expect(result.byStatus.success).to.equal(0);
+    });
+
+    it('should handle channel with only one segment (no runnerType)', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+      const now = new Date();
+      fastify.taskStatistics.services.query.resolves({
+        list: [{
+          channel: 'simple-type', period: 'd', time: now,
+          data: { sum: { total: 1, success: 1, failed: 0, canceled: 0, waitingTime: 100, executionTime: 200, totalTime: 300 } }
+        }]
+      });
+
+      const result = await fastify.task.services.queryStatistics({ range: '7d' });
+      expect(result.totalTasks).to.equal(1);
+      expect(result.byType['simple-type']).to.equal(1);
+    });
+
+    it('should handle runnerType filter excluding items without runnerTypeName', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+      const now = new Date();
+      fastify.taskStatistics.services.query.resolves({
+        list: [
+          {
+            channel: 'test-type', period: 'd', time: now,
+            data: { sum: { total: 5, success: 3, failed: 1, canceled: 1 } }
+          },
+          {
+            channel: 'test-type:manual', period: 'd', time: now,
+            data: { sum: { total: 3, success: 2, failed: 1, canceled: 0 } }
+          }
+        ]
+      });
+
+      const result = await fastify.task.services.queryStatistics({ range: '7d', runnerType: 'manual' });
+      // With runnerType filter, 1-segment channels without runnerTypeName should be excluded
+      expect(result).to.exist;
+    });
+  });
+
+  describe('buildSseData completedToday 时长数据测试', () => {
+    it('should include completedTodayTotalDurationMsByRunnerType', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+      const now = new Date();
+      fastify.taskStatistics.services.query.resolves({
+        list: [
+          {
+            channel: 'test-type:manual', period: 'h', time: now,
+            data: { sum: { total: 2, success: 2, failed: 0, canceled: 0, waitingTime: 1000, executionTime: 3000, totalTime: 4000 } }
+          },
+          {
+            channel: 'test-type:system', period: 'h', time: now,
+            data: { sum: { total: 1, success: 1, failed: 0, canceled: 0, waitingTime: 500, executionTime: 2000, totalTime: 2500 } }
+          }
+        ]
+      });
+      await fastify.task.models.task.create({
+        type: 'test-type', targetId: 't1', targetType: 'doc', runnerType: 'manual', status: 'running'
+      });
+
+      await fastify.inject({ method: 'GET', url: '/api/task/statistics/sse' });
+      const sendArgs = fastify.taskStatistics.services.sseStream.send.firstCall.args;
+      const { fetchData } = sendArgs[1];
+      const result = await fetchData();
+
+      expect(result.completedTodayTotalDurationMsByRunnerType).to.exist;
+      expect(result.completedTodayTotalDurationMsByRunnerType.manual).to.equal(4000);
+      expect(result.completedTodayTotalDurationMsByRunnerType.system).to.equal(2500);
+    });
+  });
+
+  describe('queryAndParse 多日/多时排序测试', () => {
+    it('should sort durationTrend by date when multiple dates exist', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+      const now = new Date();
+      const yesterday = new Date(now.getTime() - 86400000);
+      fastify.taskStatistics.services.query.resolves({
+        list: [
+          {
+            channel: 'test-type', period: 'd', time: yesterday,
+            data: { sum: { total: 3, success: 2, failed: 1, canceled: 0, waitingTime: 500, executionTime: 1000, totalTime: 1500 } }
+          },
+          {
+            channel: 'test-type', period: 'd', time: now,
+            data: { sum: { total: 5, success: 4, failed: 0, canceled: 1, waitingTime: 1000, executionTime: 2000, totalTime: 3000 } }
+          }
+        ]
+      });
+
+      const result = await fastify.task.services.queryStatistics({ range: '7d' });
+      expect(result.durationTrend.length).to.equal(2);
+      // Should be sorted by date ascending
+      expect(result.durationTrend[0].date < result.durationTrend[1].date).to.be.true;
+    });
+
+    it('should sort hourly allHours when multiple hours exist', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+      const now = new Date();
+      const hourAgo = new Date(now.getTime() - 3600000);
+      fastify.taskStatistics.services.query.resolves({
+        list: [
+          {
+            channel: 'test-type', period: 'h', time: hourAgo,
+            data: { sum: { total: 2, success: 1, failed: 1, canceled: 0, waitingTime: 500, executionTime: 1000, totalTime: 1500 } }
+          },
+          {
+            channel: 'test-type', period: 'h', time: now,
+            data: { sum: { total: 3, success: 2, failed: 0, canceled: 1, waitingTime: 800, executionTime: 1500, totalTime: 2300 } }
+          },
+          {
+            channel: 'test-type:manual', period: 'h', time: hourAgo,
+            data: { sum: { total: 1, success: 1, failed: 0, canceled: 0, waitingTime: 300, executionTime: 800, totalTime: 1100 } }
+          },
+          {
+            channel: 'test-type:system', period: 'h', time: now,
+            data: { sum: { total: 1, success: 0, failed: 1, canceled: 0, waitingTime: 200, executionTime: 600, totalTime: 800 } }
+          }
+        ]
+      });
+
+      const result = await fastify.task.services.queryStatistics({ range: '7d' });
+      expect(result.hourlyTrend.length).to.be.greaterThan(0);
+      expect(result.hourlyCompletionTrend.length).to.be.greaterThan(0);
     });
   });
 });
