@@ -1,10 +1,4 @@
 const fp = require('fastify-plugin');
-const dayjs = require('dayjs');
-const utc = require('dayjs/plugin/utc');
-const timezone = require('dayjs/plugin/timezone');
-
-dayjs.extend(utc);
-dayjs.extend(timezone);
 
 const RANGE_MAP = {
   '7d': { value: 7, unit: 'day', label: '近7天' },
@@ -13,6 +7,9 @@ const RANGE_MAP = {
   '1y': { value: 1, unit: 'year', label: '近1年' }
 };
 
+const RUNNER_TYPES = ['system', 'manual'];
+const STAT_ATTRS = ['total', 'success', 'failed', 'canceled', 'waitingTime', 'executionTime', 'totalTime'];
+
 const parseRange = (range = '7d') => {
   const config = RANGE_MAP[range];
   if (!config) {
@@ -20,398 +17,535 @@ const parseRange = (range = '7d') => {
   }
   const now = new Date();
   const startTime = new Date(now);
-  if (config.unit === 'day') {
-    startTime.setDate(startTime.getDate() - config.value);
-  } else if (config.unit === 'month') {
-    startTime.setMonth(startTime.getMonth() - config.value);
-  } else if (config.unit === 'year') {
-    startTime.setFullYear(startTime.getFullYear() - config.value);
-  }
+  if (config.unit === 'day') startTime.setDate(startTime.getDate() - config.value);
+  else if (config.unit === 'month') startTime.setMonth(startTime.getMonth() - config.value);
+  else if (config.unit === 'year') startTime.setFullYear(startTime.getFullYear() - config.value);
   return { startTime, endTime: now, label: config.label, range };
 };
 
-const COUNT_ATTRIBUTES = ['total', 'success', 'failed', 'canceled', 'pending', 'waiting', 'running'];
-const TIMING_ATTRIBUTES = ['waitingTime', 'executionTime', 'totalTime'];
-const RUNNER_TYPES = ['manual', 'system'];
+const formatDate = date => {
+  const d = new Date(date);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
 
-/** 解析通道: type:runnerType:hour */
+const safeNum = v => {
+  const n = Number(v);
+  return (typeof n === 'number' && !isNaN(n) ? n : 0);
+};
+
+const getSumData = item => (item.data || {}).sum || item.data || {};
+
+const computeAvg = (sum, count) => (count > 0 ? Math.round(sum / count) : 0);
+
+// 将原始时长累加器 {count, sum*} 转为输出格式 {count, avg*}
+const toAvgDuration = ({ count, sumWaiting, sumExecution, sumTotal }) => ({
+  count,
+  avgWaitingTime: computeAvg(sumWaiting, count),
+  avgExecutionTime: computeAvg(sumExecution, count),
+  avgTotalTime: computeAvg(sumTotal, count)
+});
+
 const parseChannel = channel => {
   const parts = channel.split(':');
-  return {
-    type: parts[0] || null,
-    runnerType: parts[1] || null,
-    hour: parts[2] !== undefined ? parseInt(parts[2], 10) : null
+  return parts.length >= 2
+    ? { type: parts[0], runnerType: parts[1] }
+    : { type: channel, runnerType: null };
+};
+
+const buildChannels = async (statisticsServices, type, runnerType) => {
+  const metaResult = await statisticsServices.channelMeta.list();
+  const list = Array.isArray(metaResult) ? metaResult : metaResult.list || [];
+  const rootChannels = list.map(meta => meta.channel).filter(Boolean);
+  const types = type ? rootChannels.filter(ch => ch === type) : rootChannels;
+  const rts = runnerType ? [runnerType] : RUNNER_TYPES;
+  const channels = [];
+  for (const t of types) {
+    channels.push(t);
+    for (const rt of rts) channels.push(`${t}:${rt}`);
+  }
+  return channels;
+};
+
+// 确保时长累加器存在于 map 中
+const ensureDurationAcc = (map, key) => {
+  if (!map[key]) map[key] = { count: 0, sumWaiting: 0, sumExecution: 0, sumTotal: 0 };
+  return map[key];
+};
+
+// 累加时长到累加器
+const accumDuration = (acc, count, sum) => {
+  acc.count += count;
+  acc.sumWaiting += safeNum(sum.waitingTime);
+  acc.sumExecution += safeNum(sum.executionTime);
+  acc.sumTotal += safeNum(sum.totalTime);
+};
+
+// 创建空的 dailyMap 条目
+const createDailyMapEntry = () => ({ total: 0, byStatus: { success: 0, failed: 0, canceled: 0 }, byType: {} });
+
+// 创建空的 dailyDurationMap 条目
+const createDailyDurationEntry = () => ({
+  completedCount: 0, successCount: 0, failedCount: 0, canceledCount: 0,
+  sumWaiting: 0, sumExecution: 0, sumTotal: 0, countWithTiming: 0,
+  byType: {}, byRunnerType: {}
+});
+
+// 查询 statistics 并解析结果
+const queryAndParse = async (statisticsServices, { channels, startTime, endTime, timezone, runnerType: runnerTypeFilter }) => {
+  if (channels.length === 0) return null;
+
+  const statResult = await statisticsServices.query({
+    channels, startTime, endTime,
+    attributeNames: STAT_ATTRS,
+    aggregates: ['sum'],
+    timezone: timezone || undefined
+  });
+
+  const result = {
+    totalTasks: 0,
+    byStatus: { success: 0, failed: 0, canceled: 0 },
+    byType: {},
+    byRunnerType: {},
+    dailyMap: {},
+    hourlyMap: {},
+    hourlyStatusMap: {},
+    hourlyTypeMap: {},
+    hourlyDetailMap: {},
+    duration: {
+      completedCount: 0, successCount: 0, failedCount: 0, canceledCount: 0,
+      sumWaiting: 0, sumExecution: 0, sumTotal: 0, countWithTiming: 0,
+      byType: {}, byRunnerType: {}, byTypeByRunnerType: {}
+    },
+    durationTrend: []
   };
+  const dailyDurationMap = {};
+
+  for (const item of statResult.list || []) {
+    const { type: typeName, runnerType: runnerTypeName } = parseChannel(item.channel);
+    if (runnerTypeFilter && runnerTypeName && runnerTypeName !== runnerTypeFilter) continue;
+    if (runnerTypeFilter && !runnerTypeName) continue;
+
+    const sum = getSumData(item);
+    const count = safeNum(sum.total);
+    const isHourly = item.period === 'h';
+    const date = formatDate(item.time);
+    const hour = isHourly ? new Date(item.time).getHours() : null;
+
+    // ─── 1-segment channel: 全局 + 按日 + 时长 聚合 ───
+    if (!runnerTypeName) {
+      // 全局汇总
+      result.totalTasks += count;
+      result.byStatus.success += safeNum(sum.success);
+      result.byStatus.failed += safeNum(sum.failed);
+      result.byStatus.canceled += safeNum(sum.canceled);
+      result.byType[typeName] = (result.byType[typeName] || 0) + count;
+
+      // 全局时长
+      result.duration.completedCount += count;
+      result.duration.successCount += safeNum(sum.success);
+      result.duration.failedCount += safeNum(sum.failed);
+      result.duration.canceledCount += safeNum(sum.canceled);
+      result.duration.sumWaiting += safeNum(sum.waitingTime);
+      result.duration.sumExecution += safeNum(sum.executionTime);
+      result.duration.sumTotal += safeNum(sum.totalTime);
+      result.duration.countWithTiming += count;
+      if (count > 0) accumDuration(ensureDurationAcc(result.duration.byType, typeName), count, sum);
+
+      // 按日汇总
+      if (!result.dailyMap[date]) result.dailyMap[date] = createDailyMapEntry();
+      const dm = result.dailyMap[date];
+      dm.total += count;
+      dm.byStatus.success += safeNum(sum.success);
+      dm.byStatus.failed += safeNum(sum.failed);
+      dm.byStatus.canceled += safeNum(sum.canceled);
+      dm.byType[typeName] = (dm.byType[typeName] || 0) + count;
+
+      // 按日时长
+      if (!dailyDurationMap[date]) dailyDurationMap[date] = createDailyDurationEntry();
+      const dd = dailyDurationMap[date];
+      dd.completedCount += count;
+      dd.successCount += safeNum(sum.success);
+      dd.failedCount += safeNum(sum.failed);
+      dd.canceledCount += safeNum(sum.canceled);
+      dd.sumWaiting += safeNum(sum.waitingTime);
+      dd.sumExecution += safeNum(sum.executionTime);
+      dd.sumTotal += safeNum(sum.totalTime);
+      dd.countWithTiming += count;
+      if (count > 0) accumDuration(ensureDurationAcc(dd.byType, typeName), count, sum);
+
+      // 小时级趋势（仅 period='h'）
+      if (isHourly) {
+        if (!result.hourlyMap[date]) result.hourlyMap[date] = {};
+        result.hourlyMap[date][hour] = (result.hourlyMap[date][hour] || 0) + count;
+
+        if (!result.hourlyStatusMap[date]) result.hourlyStatusMap[date] = {};
+        if (!result.hourlyStatusMap[date][hour]) result.hourlyStatusMap[date][hour] = {};
+        for (const status of ['success', 'failed', 'canceled']) {
+          const sc = safeNum(sum[status]);
+          if (sc > 0) result.hourlyStatusMap[date][hour][status] = (result.hourlyStatusMap[date][hour][status] || 0) + sc;
+        }
+
+        if (!result.hourlyTypeMap[date]) result.hourlyTypeMap[date] = {};
+        if (!result.hourlyTypeMap[date][hour]) result.hourlyTypeMap[date][hour] = {};
+        if (count > 0) result.hourlyTypeMap[date][hour][typeName] = (result.hourlyTypeMap[date][hour][typeName] || 0) + count;
+      }
+    }
+
+    // ─── 2-segment channel: byRunnerType 聚合 ───
+    if (runnerTypeName) {
+      result.byRunnerType[runnerTypeName] = (result.byRunnerType[runnerTypeName] || 0) + count;
+
+      if (count > 0) {
+        accumDuration(ensureDurationAcc(result.duration.byRunnerType, runnerTypeName), count, sum);
+
+        // byTypeByRunnerType（覆盖写入，非累加）
+        if (!result.duration.byTypeByRunnerType[runnerTypeName]) result.duration.byTypeByRunnerType[runnerTypeName] = {};
+        result.duration.byTypeByRunnerType[runnerTypeName][typeName] = {
+          count,
+          sumWaiting: safeNum(sum.waitingTime),
+          sumExecution: safeNum(sum.executionTime),
+          sumTotal: safeNum(sum.totalTime)
+        };
+
+        // 按日 byRunnerType 时长
+        if (dailyDurationMap[date]) {
+          accumDuration(ensureDurationAcc(dailyDurationMap[date].byRunnerType, runnerTypeName), count, sum);
+        }
+      }
+
+      // hourlyDetailMap（仅 period='h'）
+      if (isHourly) {
+        if (!result.hourlyDetailMap[date]) result.hourlyDetailMap[date] = {};
+        if (!result.hourlyDetailMap[date][hour]) result.hourlyDetailMap[date][hour] = {};
+        if (!result.hourlyDetailMap[date][hour][typeName]) result.hourlyDetailMap[date][hour][typeName] = {};
+        if (!result.hourlyDetailMap[date][hour][typeName][runnerTypeName]) {
+          result.hourlyDetailMap[date][hour][typeName][runnerTypeName] = { total: 0, success: 0, failed: 0, canceled: 0 };
+        }
+        const detail = result.hourlyDetailMap[date][hour][typeName][runnerTypeName];
+        detail.total += count;
+        detail.success += safeNum(sum.success);
+        detail.failed += safeNum(sum.failed);
+        detail.canceled += safeNum(sum.canceled);
+      }
+    }
+  }
+
+  // 构建按日时长趋势
+  result.durationTrend = Object.entries(dailyDurationMap)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([date, dd]) => ({
+      date,
+      completedCount: dd.completedCount,
+      successCount: dd.successCount,
+      failedCount: dd.failedCount,
+      canceledCount: dd.canceledCount,
+      avgWaitingTime: computeAvg(dd.sumWaiting, dd.countWithTiming),
+      avgExecutionTime: computeAvg(dd.sumExecution, dd.countWithTiming),
+      avgTotalTime: computeAvg(dd.sumTotal, dd.countWithTiming),
+      byType: Object.fromEntries(Object.entries(dd.byType).map(([n, td]) => [n, toAvgDuration(td)])),
+      byRunnerType: Object.fromEntries(Object.entries(dd.byRunnerType).map(([n, rt]) => [n, toAvgDuration(rt)]))
+    }));
+
+  return result;
 };
 
-/** 构建不同层级的通道列表 */
-const buildChannels = {
-  type: types => [...types],
-  runner: (types, rts = RUNNER_TYPES) => types.flatMap(t => rts.map(rt => `${t}:${rt}`)),
-  hour: (types, rts = RUNNER_TYPES) => types.flatMap(t =>
-    rts.flatMap(rt => Array.from({ length: 24 }, (_, h) => `${t}:${rt}:${h}`))
+// 构建 todayDuration 结果
+const buildDurationResult = (d) => ({
+  completedCount: d.completedCount,
+  successCount: d.successCount,
+  failedCount: d.failedCount,
+  canceledCount: d.canceledCount,
+  avgWaitingTime: computeAvg(d.sumWaiting, d.countWithTiming),
+  avgExecutionTime: computeAvg(d.sumExecution, d.countWithTiming),
+  avgTotalTime: computeAvg(d.sumTotal, d.countWithTiming),
+  byType: Object.fromEntries(Object.entries(d.byType).map(([n, td]) => [n, toAvgDuration(td)])),
+  byRunnerType: Object.fromEntries(Object.entries(d.byRunnerType).map(([n, rt]) => [n, toAvgDuration(rt)])),
+  byTypeByRunnerType: Object.fromEntries(
+    Object.entries(d.byTypeByRunnerType).map(([rtName, types]) => [
+      rtName,
+      Object.fromEntries(Object.entries(types).map(([typeName, td]) => [typeName, toAvgDuration(td)]))
+    ])
   )
-};
-
-/** 按 period 过滤查询结果 */
-const filterByPeriod = (list, period) => (list || []).filter(item => item.period === period);
-
-/** 从 item 中提取 sum 数据（兼容单聚合/多聚合格式） */
-const getSumData = item => {
-  const data = item.data || {};
-  return data.sum || data;
-};
-
-/** 空的实时统计结果 */
-const emptyRealtimeResult = todayDate => ({
-  date: todayDate, totalTasks: 0, byStatus: {}, byType: {}, byRunnerType: {},
-  hourlyTrend: [], hourlyTrendByType: [], hourlyTrendByStatus: [],
-  todayDuration: null, waitingByRunnerType: {}, pendingByRunnerType: {},
-  completedToday: {}, runnerTypeStats: {},
-  waitingQueueMaxWaitMsByRunnerType: {}, completedTodayTotalDurationMsByRunnerType: {}
 });
 
-/** 空的历史统计结果 */
-const emptyHistoryResult = () => ({
-  totalTasks: 0, byStatus: {}, byType: {},
-  recentTrend: [], recentTrendByType: [], durationTrend: [], hourlyCompletionTrend: []
-});
+// 构建小时趋势数组（完整格式，供 history 接口使用）
+const buildHourlyTrendArrays = (parsed) => {
+  const hourlyTrend = [];
+  const hourlyTrendByStatus = [];
+  const hourlyTrendByType = [];
+  const hourlyCompletionTrend = [];
+
+  const dates = Object.keys(parsed.hourlyMap).sort();
+  for (const date of dates) {
+    const hoursMap = parsed.hourlyMap[date] || {};
+    const statusMap = parsed.hourlyStatusMap[date] || {};
+    const typeMap = parsed.hourlyTypeMap[date] || {};
+    const detailMap = parsed.hourlyDetailMap[date] || {};
+
+    const allHours = [...new Set([
+      ...Object.keys(hoursMap).map(Number),
+      ...Object.keys(statusMap).map(Number),
+      ...Object.keys(typeMap).map(Number),
+      ...Object.keys(detailMap).map(Number)
+    ])].sort((a, b) => a - b);
+
+    for (const hour of allHours) {
+      const statuses = statusMap[hour] || {};
+      hourlyTrend.push({
+        date, hour,
+        total: hoursMap[hour] || 0,
+        success: statuses.success || 0,
+        failed: statuses.failed || 0,
+        canceled: statuses.canceled || 0
+      });
+      for (const [status, count] of Object.entries(statuses)) {
+        if (count > 0) hourlyTrendByStatus.push({ date, hour, status, count });
+      }
+      const types = typeMap[hour] || {};
+      for (const [typeName, count] of Object.entries(types)) {
+        if (count > 0) hourlyTrendByType.push({ date, hour, type: typeName, count });
+      }
+    }
+
+    for (const hour of Object.keys(detailMap).map(Number).sort((a, b) => a - b)) {
+      const types = detailMap[hour] || {};
+      for (const [typeName, runnerTypes] of Object.entries(types)) {
+        for (const [runnerTypeName, detail] of Object.entries(runnerTypes)) {
+          if (detail.total > 0) {
+            hourlyCompletionTrend.push({
+              date, hour, type: typeName, runnerType: runnerTypeName,
+              totalCompleted: detail.total,
+              successCount: detail.success,
+              failedCount: detail.failed,
+              canceledCount: detail.canceled
+            });
+          }
+        }
+      }
+    }
+  }
+
+  return { hourlyTrend, hourlyTrendByStatus, hourlyTrendByType, hourlyCompletionTrend };
+};
+
+// 构建历史日趋势数组
+const buildDailyTrendArrays = (parsed) => {
+  const sorted = Object.entries(parsed.dailyMap).sort(([a], [b]) => a.localeCompare(b));
+  const recentTrend = sorted.map(([date, d]) => ({ date, count: d.total }));
+  const recentTrendByStatus = [];
+  const recentTrendByType = [];
+  sorted.forEach(([date, d]) => {
+    Object.entries(d.byStatus).forEach(([status, count]) => recentTrendByStatus.push({ date, status, count }));
+    Object.entries(d.byType).forEach(([type, count]) => recentTrendByType.push({ date, type, count }));
+  });
+  return { recentTrend, recentTrendByStatus, recentTrendByType };
+};
 
 module.exports = fp(async (fastify, options) => {
   const statisticsServices = fastify[`${options.name}Statistics`].services;
+  const { task: TaskModel } = fastify[options.name].models;
+  const { Op, fn, col } = fastify.sequelize.Sequelize;
 
-  /** 获取所有任务类型（通过 channelMeta 根通道，无冒号） */
-  const getTaskTypes = async () => {
-    const metas = await statisticsServices.channelMeta.list();
-    return metas.map(m => m.channel).filter(ch => ch && !ch.includes(':'));
-  };
-
-  /**
-   * 实时统计：通过统计模块查询今日数据
-   */
-  const queryRealtimeData = async ({ timezone }) => {
-    const tz = timezone || 'UTC';
-    const now = dayjs().tz(tz);
-    const todayStart = now.startOf('day').toDate();
-    const todayDate = now.format('YYYY-MM-DD');
-
-    const taskTypes = await getTaskTypes();
-    if (taskTypes.length === 0) return emptyRealtimeResult(todayDate);
-
-    const typeChannels = buildChannels.type(taskTypes);
-    const runnerChannels = buildChannels.runner(taskTypes);
-    const hourChannels = buildChannels.hour(taskTypes);
-
-    // 1. 按类型查询计数汇总
-    const typeCountResult = await statisticsServices.query({
-      channels: typeChannels, startTime: todayStart, endTime: now.toDate(),
-      attributeNames: COUNT_ATTRIBUTES, aggregates: ['sum'], timezone: tz
-    });
-
-    // 2. 按执行方式查询计数
-    const runnerCountResult = await statisticsServices.query({
-      channels: runnerChannels, startTime: todayStart, endTime: now.toDate(),
-      attributeNames: COUNT_ATTRIBUTES, aggregates: ['sum'], timezone: tz
-    });
-
-    // 3. 按小时通道查询计数趋势
-    const hourCountResult = await statisticsServices.query({
-      channels: hourChannels, startTime: todayStart, endTime: now.toDate(),
-      attributeNames: COUNT_ATTRIBUTES, aggregates: ['sum'], timezone: tz
-    });
-
-    // 汇总 byStatus / byType / totalTasks
-    const byStatus = {};
-    const byType = {};
-    let totalTasks = 0;
-    for (const item of typeCountResult.list || []) {
-      const sumData = getSumData(item);
-      if (sumData.total !== undefined) {
-        byType[item.channel] = Math.round(sumData.total);
-        totalTasks += Math.round(sumData.total);
-      }
-      for (const status of COUNT_ATTRIBUTES) {
-        if (status !== 'total' && sumData[status] !== undefined) {
-          byStatus[status] = (byStatus[status] || 0) + Math.round(sumData[status]);
-        }
-      }
-    }
-
-    // 汇总 byRunnerType / waiting / pending / completed / runnerTypeStats
-    const byRunnerType = {};
-    const waitingByRunnerType = {};
-    const pendingByRunnerType = {};
-    const completedToday = {};
-    const runnerTypeStats = {};
-    for (const item of runnerCountResult.list || []) {
-      const { runnerType } = parseChannel(item.channel);
-      if (!runnerType) continue;
-      const sumData = getSumData(item);
-      if (sumData.total !== undefined) {
-        byRunnerType[runnerType] = (byRunnerType[runnerType] || 0) + Math.round(sumData.total);
-      }
-      if (!runnerTypeStats[runnerType]) runnerTypeStats[runnerType] = { total: 0, waiting: 0, waitingCount: 0 };
-      if (sumData.total !== undefined) runnerTypeStats[runnerType].total += Math.round(sumData.total);
-      if (sumData.waiting !== undefined) {
-        const w = Math.round(sumData.waiting);
-        waitingByRunnerType[runnerType] = w;
-        runnerTypeStats[runnerType].waiting += w;
-        runnerTypeStats[runnerType].waitingCount += w;
-      }
-      if (sumData.pending !== undefined) pendingByRunnerType[runnerType] = Math.round(sumData.pending);
-      if (sumData.success !== undefined) completedToday[runnerType] = Math.round(sumData.success);
-    }
-
-    // 按小时趋势（直接从 channel 中的小时数分组，用 time 字段做时区转换）
-    const hourBuckets = {};
-    for (const item of hourCountResult.list || []) {
-      const { hour: channelHour, type: taskType } = parseChannel(item.channel);
-      if (channelHour === null || isNaN(channelHour)) continue;
-      // 使用 time 字段获取本地小时（更精确的时区处理）
-      const localHour = item.time ? dayjs(item.time).tz(tz).hour() : channelHour;
-      const sumData = getSumData(item);
-      const count = sumData.total !== undefined ? Math.round(sumData.total) : 0;
-
-      if (!hourBuckets[localHour]) hourBuckets[localHour] = { total: 0, byType: {}, byStatus: {} };
-      const bucket = hourBuckets[localHour];
-      bucket.total += count;
-      if (taskType) bucket.byType[taskType] = (bucket.byType[taskType] || 0) + count;
-      for (const status of COUNT_ATTRIBUTES) {
-        if (status !== 'total' && sumData[status] !== undefined) {
-          bucket.byStatus[status] = (bucket.byStatus[status] || 0) + Math.round(sumData[status]);
-        }
-      }
-    }
-
-    const hourlyTrend = [], hourlyTrendByType = [], hourlyTrendByStatus = [];
-    for (const [h, bucket] of Object.entries(hourBuckets)) {
-      const hour = parseInt(h, 10);
-      if (bucket.total > 0) hourlyTrend.push({ hour, count: bucket.total });
-      for (const [type, count] of Object.entries(bucket.byType)) hourlyTrendByType.push({ hour, type, count });
-      for (const [status, count] of Object.entries(bucket.byStatus)) hourlyTrendByStatus.push({ hour, status, count });
-    }
-
-    // 时长统计（avg 聚合）
-    const durationResult = await statisticsServices.query({
-      channels: runnerChannels, startTime: todayStart, endTime: now.toDate(),
-      attributeNames: TIMING_ATTRIBUTES, aggregates: ['avg'], timezone: tz
-    });
-    let totalAvgExec = 0, totalAvgWait = 0, totalAvgTotal = 0, durationCount = 0;
-    for (const item of durationResult.list || []) {
-      const avgData = item.data?.avg || item.data || {};
-      if (avgData.totalTime !== undefined) {
-        totalAvgExec += avgData.executionTime || 0;
-        totalAvgWait += avgData.waitingTime || 0;
-        totalAvgTotal += avgData.totalTime || 0;
-        durationCount++;
-      }
-    }
-    const todayDuration = durationCount > 0 ? {
-      avgExecutionTime: Math.round(totalAvgExec / durationCount),
-      avgWaitingTime: Math.round(totalAvgWait / durationCount),
-      avgTotalTime: Math.round(totalAvgTotal / durationCount)
-    } : null;
-
-    // 等待队列最长等待时间（max 聚合）
-    const maxWaitResult = await statisticsServices.query({
-      channels: runnerChannels, startTime: todayStart, endTime: now.toDate(),
-      attributeNames: ['waitingTime'], aggregates: ['max'], timezone: tz
-    });
-    const waitingQueueMaxWaitMsByRunnerType = {};
-    for (const item of maxWaitResult.list || []) {
-      const { runnerType } = parseChannel(item.channel);
-      if (!runnerType) continue;
-      const maxData = item.data?.max || item.data || {};
-      if (maxData.waitingTime !== undefined) {
-        const v = Math.round(maxData.waitingTime);
-        if (!waitingQueueMaxWaitMsByRunnerType[runnerType] || v > waitingQueueMaxWaitMsByRunnerType[runnerType]) {
-          waitingQueueMaxWaitMsByRunnerType[runnerType] = v;
-        }
-      }
-    }
-
-    // 当日完成任务的创建→完成总耗时（sum 聚合）
-    const totalDurationResult = await statisticsServices.query({
-      channels: runnerChannels, startTime: todayStart, endTime: now.toDate(),
-      attributeNames: ['totalTime'], aggregates: ['sum'], timezone: tz
-    });
-    const completedTodayTotalDurationMsByRunnerType = {};
-    for (const item of totalDurationResult.list || []) {
-      const { runnerType } = parseChannel(item.channel);
-      if (!runnerType) continue;
-      const sumData = getSumData(item);
-      if (sumData.totalTime !== undefined) {
-        completedTodayTotalDurationMsByRunnerType[runnerType] =
-          (completedTodayTotalDurationMsByRunnerType[runnerType] || 0) + Math.round(sumData.totalTime);
-      }
-    }
-
-    return {
-      date: todayDate, totalTasks, byStatus, byType, byRunnerType,
-      hourlyTrend, hourlyTrendByType, hourlyTrendByStatus, todayDuration,
-      waitingByRunnerType, pendingByRunnerType, completedToday, runnerTypeStats,
-      waitingQueueMaxWaitMsByRunnerType, completedTodayTotalDurationMsByRunnerType
-    };
-  };
-
-  /**
-   * 历史统计：通过统计模块查询
-   */
-  const queryHistoryData = async ({ range = '7d', timezone, type, runnerType }) => {
-    const { startTime, endTime } = parseRange(range);
-    const tz = timezone || undefined;
-
-    const taskTypes = type ? [type] : await getTaskTypes();
-    const runnerTypes = runnerType ? [runnerType] : RUNNER_TYPES;
-
-    if (taskTypes.length === 0) return emptyHistoryResult();
-
-    const typeChannels = buildChannels.type(taskTypes);
-    const runnerChannels = buildChannels.runner(taskTypes, runnerTypes);
-    const hourChannels = buildChannels.hour(taskTypes, runnerTypes);
-
-    // 按类型查询计数汇总
-    const typeCountResult = await statisticsServices.query({
-      channels: typeChannels, startTime, endTime,
-      attributeNames: COUNT_ATTRIBUTES, aggregates: ['sum'], timezone: tz
-    });
-
-    // 按小时通道查询计数趋势
-    const hourCountResult = await statisticsServices.query({
-      channels: hourChannels, startTime, endTime,
-      attributeNames: COUNT_ATTRIBUTES, aggregates: ['sum'], timezone: tz
-    });
-
-    // 汇总
-    const byStatus = {};
-    const byType = {};
-    let totalTasks = 0;
-    for (const item of typeCountResult.list || []) {
-      const sumData = getSumData(item);
-      if (sumData.total !== undefined) {
-        byType[item.channel] = Math.round(sumData.total);
-        totalTasks += Math.round(sumData.total);
-      }
-      for (const status of COUNT_ATTRIBUTES) {
-        if (status !== 'total' && sumData[status] !== undefined) {
-          byStatus[status] = (byStatus[status] || 0) + Math.round(sumData[status]);
-        }
-      }
-    }
-
-    // 按日聚合趋势（从小时通道数据中按 time 日期分组）
-    const dateMap = {};
-    for (const item of hourCountResult.list || []) {
-      if (!item.time) continue;
-      const dateStr = tz ? dayjs(item.time).tz(tz).format('YYYY-MM-DD') : dayjs(item.time).format('YYYY-MM-DD');
-      const sumData = getSumData(item);
-      const { type: taskType } = parseChannel(item.channel);
-      const count = sumData.total !== undefined ? Math.round(sumData.total) : 0;
-
-      if (!dateMap[dateStr]) dateMap[dateStr] = { total: 0, byType: {} };
-      dateMap[dateStr].total += count;
-      if (taskType) dateMap[dateStr].byType[taskType] = (dateMap[dateStr].byType[taskType] || 0) + count;
-    }
-
-    const recentTrend = Object.entries(dateMap)
-      .map(([date, data]) => ({ date, count: data.total }))
-      .sort((a, b) => a.date.localeCompare(b.date));
-
-    const recentTrendByType = [];
-    for (const [date, data] of Object.entries(dateMap)) {
-      for (const [t, count] of Object.entries(data.byType)) {
-        recentTrendByType.push({ date, type: t, count });
-      }
-    }
-    recentTrendByType.sort((a, b) => a.date.localeCompare(b.date) || a.type.localeCompare(b.type));
-
-    // hourlyCompletionTrend（按日期+小时聚合，小时从 channel 解析）
-    const hourDayMap = {};
-    for (const item of hourCountResult.list || []) {
-      if (!item.time) continue;
-      const dj = tz ? dayjs(item.time).tz(tz) : dayjs(item.time);
-      const date = dj.format('YYYY-MM-DD');
-      const { hour } = parseChannel(item.channel);
-      if (hour === null || isNaN(hour)) continue;
-      const key = `${date}|${hour}`;
-      if (!hourDayMap[key]) hourDayMap[key] = { date, hour, byStatus: {}, byType: {}, total: 0 };
-
-      const bucket = hourDayMap[key];
-      const sumData = getSumData(item);
-      const { type: taskType } = parseChannel(item.channel);
-      if (sumData.total !== undefined) bucket.total += Math.round(sumData.total);
-      for (const status of COUNT_ATTRIBUTES) {
-        if (status !== 'total' && sumData[status] !== undefined) {
-          bucket.byStatus[status] = (bucket.byStatus[status] || 0) + Math.round(sumData[status]);
-        }
-      }
-      if (taskType && sumData.total !== undefined) {
-        bucket.byType[taskType] = (bucket.byType[taskType] || 0) + Math.round(sumData.total);
-      }
-    }
-
-    const hourlyCompletionTrend = Object.values(hourDayMap).map(b => ({
-      date: b.date, hour: b.hour, totalCompleted: b.total,
-      ...b.byStatus,
-      ...Object.fromEntries(Object.entries(b.byType).map(([t, c]) => [`${t}Count`, c]))
-    }));
-
-    // 时长趋势（按日 + runnerType 聚合平均执行/等待时长）
-    const durationResult = await statisticsServices.query({
-      channels: runnerChannels, startTime, endTime,
-      attributeNames: TIMING_ATTRIBUTES, aggregates: ['avg', 'sum', 'count'], timezone: tz
-    });
-
-    const durationByDate = {};
-    for (const item of durationResult.list || []) {
-      if (!item.time) continue;
-      const dateStr = tz ? dayjs(item.time).tz(tz).format('YYYY-MM-DD') : dayjs(item.time).format('YYYY-MM-DD');
-      const { runnerType: rt } = parseChannel(item.channel);
-      if (!rt) continue;
-
-      const data = item.data || {};
-      const sumData = data.sum || {};
-      const countData = data.count || {};
-      const avgData = data.avg || {};
-
-      let avgExecutionTime = 0, avgWaitingTime = 0;
-      if (countData.totalTime > 0 && sumData.executionTime !== undefined) {
-        avgExecutionTime = Math.round(sumData.executionTime / countData.totalTime);
-        avgWaitingTime = Math.round((sumData.waitingTime || 0) / countData.totalTime);
-      } else if (avgData.executionTime !== undefined) {
-        avgExecutionTime = Math.round(avgData.executionTime);
-        avgWaitingTime = Math.round(avgData.waitingTime || 0);
-      }
-
-      if (avgExecutionTime > 0 || avgWaitingTime > 0) {
-        if (!durationByDate[dateStr]) durationByDate[dateStr] = {};
-        durationByDate[dateStr][rt] = { avgExecutionTime, avgWaitingTime };
-      }
-    }
-
-    const durationTrend = Object.entries(durationByDate)
-      .map(([date, byRunnerType]) => ({ date, byRunnerType }))
-      .sort((a, b) => a.date.localeCompare(b.date));
-
-    return {
-      totalTasks, byStatus, byType,
-      recentTrend, recentTrendByType, durationTrend, hourlyCompletionTrend
-    };
-  };
-
-  /** HTTP 接口：历史统计概览 */
+  // ─── queryStatistics (history 接口) ───
   const queryStatistics = async ({ range = '7d', timezone, type, runnerType }) => {
-    return await queryHistoryData({ range, timezone, type, runnerType });
+    const { startTime, endTime, label, range: rangeKey } = parseRange(range);
+    const emptyResult = {
+      range: rangeKey, rangeLabel: label,
+      totalTasks: 0, byStatus: {}, byType: {}, byRunnerType: {},
+      recentTrend: [], recentTrendByStatus: [], recentTrendByType: [],
+      durationTrend: [], hourlyCompletionTrend: []
+    };
+    try {
+      const channels = await buildChannels(statisticsServices, type, runnerType);
+      const parsed = await queryAndParse(statisticsServices, { channels, startTime, endTime, timezone, runnerType });
+      if (!parsed) return emptyResult;
+
+      const { recentTrend, recentTrendByStatus, recentTrendByType } = buildDailyTrendArrays(parsed);
+      const { hourlyTrend, hourlyCompletionTrend } = buildHourlyTrendArrays(parsed);
+
+      return {
+        range: rangeKey, rangeLabel: label,
+        totalTasks: parsed.totalTasks,
+        byStatus: parsed.byStatus,
+        byType: parsed.byType,
+        byRunnerType: parsed.byRunnerType,
+        recentTrend, recentTrendByStatus, recentTrendByType,
+        durationTrend: parsed.durationTrend,
+        hourlyTrend, hourlyCompletionTrend
+      };
+    } catch (e) {
+      fastify.log.error(`查询统计数据失败: ${e.message}`);
+      return emptyResult;
+    }
   };
 
-  /** SSE 接口：实时统计推送 */
-  const sseStatistics = async ({ timezone, interval }, reply) => {
+  // ─── buildSseData (SSE 接口) ───
+  const buildSseData = async ({ timezone, type, runnerType }) => {
+    const now = new Date();
+    const todayStart = new Date(now); todayStart.setHours(0, 0, 0, 0);
+    const todayEnd = new Date(now); todayEnd.setHours(23, 59, 59, 999);
+    const todayStr = formatDate(now);
+
+    // 统计查询：正在执行和等待执行的数量 + DB 查询
+    const [runnerTypeStatusRows, waitingTasks] = await Promise.all([
+      TaskModel.findAll({
+        attributes: ['runnerType', 'status', [fn('COUNT', col('id')), 'count']],
+        where: { ...(runnerType ? { runnerType } : {}) },
+        group: ['runnerType', 'status'], raw: true
+      }),
+      TaskModel.findAll({
+        attributes: ['runnerType', 'createdAt'],
+        where: { status: { [Op.in]: ['pending', 'waiting'] }, ...(runnerType ? { runnerType } : {}) },
+        raw: true
+      })
+    ]);
+
+    const pendingByRunnerType = {};
+    const waitingByRunnerType = {};
+    const runningByRunnerType = {};
+
+    const nowMs = Date.now();
+    const waitingQueueMaxWaitMsByRunnerType = {};
+    waitingTasks.forEach(r => {
+      const rt = r.runnerType || 'manual';
+      const waitMs = nowMs - new Date(r.createdAt).getTime();
+      if (!waitingQueueMaxWaitMsByRunnerType[rt] || waitMs > waitingQueueMaxWaitMsByRunnerType[rt]) {
+        waitingQueueMaxWaitMsByRunnerType[rt] = waitMs;
+      }
+    });
+
+    const runnerTypeStats = {};
+    const dbStatusCount = { pending: 0, waiting: 0, running: 0, success: 0, failed: 0, canceled: 0 };
+    runnerTypeStatusRows.forEach(r => {
+      if (!runnerTypeStats[r.runnerType]) runnerTypeStats[r.runnerType] = { total: 0, pending: 0, waiting: 0, waitingCount: 0, executed: 0 };
+      const count = Number(r.count);
+      const rt = r.runnerType || 'manual';
+      runnerTypeStats[r.runnerType].total += count;
+      if (r.status === 'pending') runnerTypeStats[r.runnerType].pending += count;
+      if (['success', 'failed', 'canceled', 'running'].includes(r.status)) runnerTypeStats[r.runnerType].executed += count;
+      if (dbStatusCount[r.status] !== undefined) dbStatusCount[r.status] += count;
+      // 按 runnerType 汇总 running/waiting/pending（来自 DB 实时状态，避免 delta 脏数据）
+      if (r.status === 'running') runningByRunnerType[rt] = (runningByRunnerType[rt] || 0) + count;
+      if (r.status === 'waiting') waitingByRunnerType[rt] = (waitingByRunnerType[rt] || 0) + count;
+      if (r.status === 'pending') pendingByRunnerType[rt] = (pendingByRunnerType[rt] || 0) + count;
+      // pending 状态等同于"等待操作"，计入 waitingByRunnerType 和 runnerTypeStats.waiting/waitingCount
+      if (r.status === 'pending') {
+        waitingByRunnerType[rt] = (waitingByRunnerType[rt] || 0) + count;
+        runnerTypeStats[r.runnerType].waiting += count;
+        runnerTypeStats[r.runnerType].waitingCount += count;
+      }
+      if (r.status === 'waiting') {
+        runnerTypeStats[r.runnerType].waiting += count;
+        runnerTypeStats[r.runnerType].waitingCount += count;
+      }
+    });
+
+    // Statistics 查询：已完成数据
+    // 默认值：DB 实时数据（即使 statistics 服务不可用也能展示 running/waiting/pending）
+    // pending 全部合并到 waiting：前端"等待操作"只有 waiting 类别，不展示独立的 pending
+    const dbWaitingTotal = dbStatusCount.waiting + dbStatusCount.pending;
+    let totalTasks = dbStatusCount.running + dbWaitingTotal;
+    let byStatus = { success: 0, failed: 0, canceled: 0, running: dbStatusCount.running, waiting: dbWaitingTotal, pending: 0 };
+    let byType = {};
+    let byRunnerType = {};
+    let completedToday = {};
+    let completedTodayTotalDurationMsByRunnerType = {};
+    let hourlyTrend = [];
+    let hourlyTrendByStatus = [];
+    let hourlyTrendByType = [];
+    let intervalTrend = [];
+    let todayDuration = {
+      completedCount: 0, successCount: 0, failedCount: 0, canceledCount: 0,
+      avgWaitingTime: 0, avgExecutionTime: 0, avgTotalTime: 0,
+      byType: {}, byRunnerType: {}, byTypeByRunnerType: {}
+    };
+
+    try {
+      const channels = await buildChannels(statisticsServices, type, runnerType);
+      const parsed = await queryAndParse(statisticsServices, { channels, startTime: todayStart, endTime: todayEnd, timezone, runnerType });
+      if (parsed) {
+        totalTasks = parsed.totalTasks + dbStatusCount.running + dbWaitingTotal;
+        byStatus = { ...parsed.byStatus, running: dbStatusCount.running, waiting: dbWaitingTotal, pending: 0 };
+        byType = parsed.byType;
+        byRunnerType = parsed.byRunnerType;
+        completedToday = { ...parsed.byRunnerType };
+        todayDuration = buildDurationResult(parsed.duration);
+
+        const hourlyArrays = buildHourlyTrendArrays(parsed);
+
+        // SSE 格式：简化为 {hour, count}，只取当天
+        hourlyTrend = hourlyArrays.hourlyTrend
+          .filter(h => h.date === todayStr)
+          .map(({ hour, total }) => ({ hour, count: total }));
+
+        hourlyTrendByStatus = hourlyArrays.hourlyTrendByStatus
+          .filter(h => h.date === todayStr)
+          .map(({ hour, status, count }) => ({ hour, status, count }));
+
+        hourlyTrendByType = hourlyArrays.hourlyTrendByType
+          .filter(h => h.date === todayStr)
+          .map(({ hour, type, count }) => ({ hour, type, count }));
+
+        intervalTrend = hourlyTrend.map(({ hour, count }) => ({
+          interval: `${String(hour).padStart(2, '0')}:00`,
+          count
+        }));
+
+        for (const [rtName, rt] of Object.entries(parsed.duration.byRunnerType)) {
+          completedTodayTotalDurationMsByRunnerType[rtName] = rt.sumTotal;
+        }
+      }
+    } catch (e) {
+      fastify.log.error(`SSE统计查询失败: ${e.message}`);
+    }
+
+    // 补充当前小时的 running/waiting 瞬时状态（来自 DB 实时查询，不受 statistics 服务影响）
+    // 放在 try/catch 之后，确保无论 parsed 是否存在都能追加 DB 实时数据
+    // pending 已合并到 waiting，前端不单独展示 pending
+    const currentHour = now.getHours();
+    if (dbStatusCount.running > 0) hourlyTrendByStatus.push({ hour: currentHour, status: 'running', count: dbStatusCount.running });
+    if (dbWaitingTotal > 0) hourlyTrendByStatus.push({ hour: currentHour, status: 'waiting', count: dbWaitingTotal });
+
+    return {
+      date: todayStr,
+      totalTasks,
+      byStatus,
+      byType,
+      byRunnerType,
+      pendingByRunnerType,
+      waitingByRunnerType,
+      runningByRunnerType,
+      completedToday,
+      waitingQueueMaxWaitMsByRunnerType,
+      completedTodayTotalDurationMsByRunnerType,
+      runnerTypeStats,
+      hourlyTrend,
+      hourlyTrendByStatus,
+      hourlyTrendByType,
+      intervalTrend,
+      todayDuration
+    };
+  };
+
+  // ─── sseStatistics ───
+  const sseStatistics = async ({ range = '7d', timezone, type, runnerType, interval }, reply) => {
     await statisticsServices.sseStream.send(reply, {
-      name: 'query', params: { timezone },
-      fetchData: async () => await queryRealtimeData({ timezone }),
+      name: 'taskStatistics',
+      params: { type, runnerType, timezone },
+      fetchData: async ({ type, runnerType, timezone } = {}) => {
+        try {
+          return await buildSseData({ timezone, type, runnerType });
+        } catch (e) {
+          fastify.log.error(`SSE获取数据失败: ${e.message}`);
+          return {};
+        }
+      },
       interval: interval || 5
     });
   };
 
-  Object.assign(fastify[options.name].services, { queryStatistics, sseStatistics });
+  Object.assign(fastify[options.name].services, {
+    queryStatistics,
+    sseStatistics
+  });
 });

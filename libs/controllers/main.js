@@ -52,6 +52,10 @@ module.exports = fp(async (fastify, options) => {
             maxRetries: {
               type: 'number',
               description: '最大自动重试次数，默认0'
+            },
+            timeout: {
+              type: 'number',
+              description: '任务超时时间（分钟），0表示不超时，默认60分钟'
             }
           },
           required: ['type', 'targetId', 'targetType']

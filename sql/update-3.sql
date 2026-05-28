@@ -1,4 +1,7 @@
 -- 新增字段（幂等）
+ALTER TABLE t_task ADD COLUMN IF NOT EXISTS "timeout" INTEGER NOT NULL DEFAULT 60;
+COMMENT ON COLUMN t_task."timeout" IS '任务超时时间（分钟），0表示不超时，默认60分钟';
+
 ALTER TABLE t_task ADD COLUMN IF NOT EXISTS "priority" INTEGER NOT NULL DEFAULT 0;
 COMMENT ON COLUMN t_task."priority" IS '任务优先级，数值越大越优先';
 

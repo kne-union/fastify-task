@@ -1,0 +1,29 @@
+[
+  {
+    "id": 317546734819476480,
+    "channel": "record-result",
+    "title": "record-result",
+    "description": null,
+    "created_at": "26/5/2026 06:17:21.314+00",
+    "updated_at": "26/5/2026 06:17:21.314+00",
+    "deleted_at": null
+  },
+  {
+    "id": 317552438905144320,
+    "channel": "digital",
+    "title": "digital",
+    "description": null,
+    "created_at": "26/5/2026 06:40:01.273+00",
+    "updated_at": "26/5/2026 06:40:01.273+00",
+    "deleted_at": null
+  },
+  {
+    "id": 317554110318511104,
+    "channel": "report",
+    "title": "report",
+    "description": null,
+    "created_at": "26/5/2026 06:46:39.77+00",
+    "updated_at": "26/5/2026 06:46:39.77+00",
+    "deleted_at": null
+  }
+]

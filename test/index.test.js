@@ -119,10 +119,66 @@ describe('@kne/fastify-task', function () {
       findByPk: async id => {
         return taskData.find(t => t.id === id) || null;
       },
-      findAll: async ({ where, limit, attributes, group, order } = {}) => {
+      findAll: async ({ where, limit, attributes, group, order, raw } = {}) => {
         let results = taskData;
         if (where) {
           results = taskData.filter(t => matchWhere(t, where, Op));
+        }
+
+        // Handle grouped queries
+        if (group) {
+          const groupFields = Array.isArray(group) ? group : [group];
+          const groupKeys = groupFields.map(g => {
+            if (g && typeof g === 'object' && g.fn === 'DATE') return 'createdAt';
+            if (typeof g === 'string') return g;
+            return null;
+          }).filter(Boolean);
+
+          const groups = {};
+          results.forEach(t => {
+            const key = groupKeys.map(k => {
+              const val = t[k];
+              return val instanceof Date ? `${val.getFullYear()}-${String(val.getMonth() + 1).padStart(2, '0')}-${String(val.getDate()).padStart(2, '0')}` : String(val);
+            }).join('|');
+
+            if (!groups[key]) {
+              groups[key] = { items: [], keyValues: {} };
+              groupKeys.forEach(k => {
+                const val = t[k];
+                groups[key].keyValues[k === 'createdAt' ? 'date' : k] = val instanceof Date ? `${val.getFullYear()}-${String(val.getMonth() + 1).padStart(2, '0')}-${String(val.getDate()).padStart(2, '0')}` : val;
+              });
+            }
+            groups[key].items.push(t);
+          });
+
+          return Object.values(groups).map(g => {
+            const row = { ...g.keyValues };
+            if (attributes) {
+              attributes.forEach(attr => {
+                if (typeof attr === 'string') {
+                  row[attr] = g.items[0]?.[attr];
+                } else if (Array.isArray(attr) && attr.length === 2) {
+                  const [expr, alias] = attr;
+                  if (expr && typeof expr === 'object' && expr.fn === 'COUNT') {
+                    row[alias] = g.items.length;
+                  }
+                }
+              });
+            }
+            return row;
+          });
+        }
+
+        // Handle attribute projection for non-grouped queries
+        if (attributes && !group) {
+          const attrKeys = attributes.map(a => typeof a === 'string' ? a : (Array.isArray(a) ? a[1] : null)).filter(Boolean);
+          if (raw && attrKeys.length > 0) {
+            results = results.map(t => {
+              const row = {};
+              attrKeys.forEach(k => { row[k] = t[k]; });
+              return row;
+            });
+          }
         }
 
         if (order && Array.isArray(order)) {
@@ -213,7 +269,12 @@ describe('@kne/fastify-task', function () {
 
     // 模拟 sequelize
     app.decorate('sequelize', {
-      Sequelize: { Op },
+      Sequelize: {
+        Op,
+        fn: sinon.stub().callsFake((fn, ...args) => ({ fn, args })),
+        col: sinon.stub().callsFake(col => ({ col })),
+        literal: sinon.stub().callsFake(lit => ({ literal: lit }))
+      },
       models: { task: mockTaskModel }
     });
 
@@ -2070,7 +2131,7 @@ describe('@kne/fastify-task', function () {
 
       expect(fastify.taskStatistics.services.sseStream.send.calledOnce).to.be.true;
       const sendArgs = fastify.taskStatistics.services.sseStream.send.firstCall.args;
-      expect(sendArgs[1].name).to.equal('query');
+      expect(sendArgs[1].name).to.equal('taskStatistics');
       expect(sendArgs[1].params).to.have.property('timezone');
     });
 
@@ -2085,7 +2146,7 @@ describe('@kne/fastify-task', function () {
 
       expect(fastify.taskStatistics.services.sseStream.send.calledOnce).to.be.true;
       const sendArgs = fastify.taskStatistics.services.sseStream.send.firstCall.args;
-      expect(sendArgs[1].name).to.equal('query');
+      expect(sendArgs[1].name).to.equal('taskStatistics');
       expect(sendArgs[1].params).to.have.property('timezone');
     });
 

@@ -32,8 +32,8 @@ module.exports = fp(async (fastify, options) => {
       hasTiming = totalTime > 0;
     }
 
-    const hour = new Date(completedAt).getUTCHours();
-    const channel = `${task.type}:${task.runnerType || 'manual'}:${hour}`;
+    const completedHour = new Date(completedAt).getHours();
+    const channel = `${task.type}:${task.runnerType || 'manual'}:${completedHour}`;
     const status = task.status || 'unknown';
 
     const data = { total: 1, [status]: 1 };
@@ -67,7 +67,7 @@ module.exports = fp(async (fastify, options) => {
     return signature === expectedSignature;
   };
 
-  const create = async ({ userId, input, type, targetId, targetType, runnerType, delay = 0, scriptName, priority = 0, parentTaskId, maxRetries = 0, options: currentOptions }) => {
+  const create = async ({ userId, input, type, targetId, targetType, runnerType, delay = 0, scriptName, priority = 0, parentTaskId, maxRetries = 0, timeout = 60, options: currentOptions }) => {
     if (typeof delay !== 'number' || delay < 0) {
       throw new Error('delay 必须为非负数');
     }
@@ -77,10 +77,13 @@ module.exports = fp(async (fastify, options) => {
     if (typeof maxRetries !== 'number' || !Number.isInteger(maxRetries) || maxRetries < 0) {
       throw new Error('maxRetries 必须为非负整数');
     }
+    if (typeof timeout !== 'number' || !Number.isInteger(timeout) || timeout < 0) {
+      throw new Error('timeout 必须为非负整数');
+    }
     if (typeof options.task[type] !== 'function') {
       throw new Error('未找到合法的任务声明');
     }
-    return await models.task.create({
+    const task = await models.task.create({
       userId,
       input,
       type,
@@ -90,22 +93,23 @@ module.exports = fp(async (fastify, options) => {
       priority,
       parentTaskId,
       maxRetries,
+      timeout,
       startTime: delay > 0 ? new Date(Date.now() + 1000 * delay) : new Date(),
       scriptName,
       options: currentOptions
     });
+    return task;
   };
 
   const resetAll = async () => {
+    const runningTasks = await models.task.findAll({
+      where: { status: 'running' },
+      attributes: ['type', 'runnerType'],
+      raw: true
+    });
     await models.task.update(
-      {
-        status: 'pending'
-      },
-      {
-        where: {
-          status: 'running'
-        }
-      }
+      { status: 'pending' },
+      { where: { status: 'running' } }
     );
   };
 
@@ -308,7 +312,42 @@ module.exports = fp(async (fastify, options) => {
     }
   };
 
+  /** 检查超时任务，将超时的 running/waiting 任务标记为 failed */
+  const checkTimeout = async () => {
+    const now = new Date();
+    const timedOutTasks = await models.task.findAll({
+      where: {
+        status: { [Op.in]: ['running', 'waiting'] },
+        timeout: { [Op.gt]: 0 },
+        startedAt: { [Op.ne]: null }
+      }
+    });
+
+    const tasksToFail = timedOutTasks.filter(task => {
+      const elapsed = now.getTime() - new Date(task.startedAt).getTime();
+      return elapsed > task.timeout * 60 * 1000;
+    });
+
+    if (tasksToFail.length === 0) return;
+
+    fastify.log.info(`检测到 ${tasksToFail.length} 个超时任务`);
+
+    for (const task of tasksToFail) {
+      const elapsed = now.getTime() - new Date(task.startedAt).getTime();
+      const prevStatus = task.status;
+      await task.update({
+        status: 'failed',
+        error: `任务超时：已执行 ${Math.round(elapsed / 60000)} 分钟，超过设定的 ${task.timeout} 分钟超时时间`,
+        completedAt: now
+      });
+      collectTaskStatistics(task);
+    }
+  };
+
   const runner = async () => {
+    // 检查超时任务
+    await checkTimeout();
+
     const runningTaskCount = await models.task.count({
       where: {
         runnerType: 'system',
@@ -395,6 +434,7 @@ module.exports = fp(async (fastify, options) => {
 
   const complete = async ({ id, userId, output, ...props }) => {
     const task = await detail({ id });
+    const prevStatus = task.status;
     if (props.status === 'success') {
       try {
         await options.task[task.type]({ task, result: output });
@@ -434,14 +474,28 @@ module.exports = fp(async (fastify, options) => {
   };
 
   const waitingComplete = async ({ id, pollInterval = 1000, maxPollTimes = 20 }) => {
-    const task = await detail({ id });
+    let task = await detail({ id });
 
     if (task.status === 'pending') {
       // 标记为最高优先级，确保立即执行（即使因重试等重新入队也会被优先处理）
       await task.update({ priority: Number.MAX_SAFE_INTEGER });
       await processSystemTask(task);
+      // processSystemTask 完成后重新加载任务状态
+      await task.reload();
     }
 
+    // 立即检查是否已到达终态
+    if (task.status === 'success') {
+      return task.output;
+    }
+    if (task.status === 'failed') {
+      throw new Error(task.error || '任务失败');
+    }
+    if (task.status === 'canceled') {
+      throw new Error(task.error || '任务取消');
+    }
+
+    // 任务仍在运行中，开始轮询
     let pollCount = 0;
     return await new Promise((resolve, reject) => {
       const executePolling = async () => {

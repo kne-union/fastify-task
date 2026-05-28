@@ -43,6 +43,11 @@ module.exports = ({ DataTypes, definePrimaryType, options }) => {
         comment: '最大重试次数，0表示不自动重试',
         defaultValue: 0
       },
+      timeout: {
+        type: DataTypes.INTEGER,
+        comment: '任务超时时间（分钟），0表示不超时，默认60分钟',
+        defaultValue: 60
+      },
       startTime: {
         type: DataTypes.DATE,
         comment: '任务最早执行时间',
