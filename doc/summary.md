@@ -51,6 +51,7 @@ running（执行中）
 | 优先级与依赖 | 优先级排序 + 父子任务链式执行 |
 | 自动重试 | 指数退避重试策略 |
 | 超时控制 | 任务级别超时设置，超时自动标记 failed |
+| 错误统一处理 | 通过 `errorHandler` 配置统一处理任务失败，支持执行错误、超时、回调失败、重试耗尽等场景 |
 | 统计面板 | 任务统计数据查询 + SSE 实时推送 |
 
 ### 使用方法
@@ -76,6 +77,17 @@ fastify.register(require('@kne/fastify-task'), {
       // 发送邮件完成后的处理
     }
   }
+});
+```
+
+```javascript
+// 带错误统一处理的注册
+fastify.register(require('@kne/fastify-task'), {
+  errorHandler: async ({ task, error, type }) => {
+    // type: 'execution' | 'timeout' | 'callback' | 'retry_exhausted'
+    console.log(`任务 ${task.id} 失败 (${type}):`, error);
+  },
+  task: { /* ... */ }
 });
 ```
 

@@ -1,11 +1,48 @@
 const fp = require('fastify-plugin');
-const path = require('node:path');
 const fs = require('fs-extra');
-const crypto = require('node:crypto');
+const SecurityValidator = require('../utils/security-validator');
+const {
+  TaskNotFoundError,
+  TaskStatusError,
+  TaskValidationError,
+  TaskExecutionError
+} = require('../utils/errors');
+const {
+  CONFIG_CONSTANTS,
+  getConfigManager
+} = require('../utils/config');
+const {
+  getCacheManager
+} = require('../utils/cache-manager');
+const TaskExecutor = require('../utils/modules/task-executor');
 
 module.exports = fp(async (fastify, options) => {
   const { models } = fastify[options.name];
   const { Op } = fastify.sequelize.Sequelize;
+
+  // 确保模块能够正确访问 SecurityValidator
+  const securityValidator = SecurityValidator;
+
+  // 初始化配置管理器
+  const configManager = getConfigManager(options);
+  const config = configManager.getAll();
+
+  // 初始化缓存管理器
+  const cacheManager = getCacheManager(300000); // 5分钟缓存
+
+  // 初始化模块化组件
+  const taskExecutor = new TaskExecutor(fastify, options, models, securityValidator, cacheManager);
+
+  // 统一调用 errorHandler
+  const handleError = async ({ task, error, type }) => {
+    if (typeof options.errorHandler === 'function') {
+      try {
+        await options.errorHandler({ task, error, type });
+      } catch (handlerError) {
+        fastify.log.error(`errorHandler 执行失败: ${handlerError.message}`);
+      }
+    }
+  };
 
   /** 通过 @kne/fastify-statistics 采集任务完成数据 */
   const collectTaskStatistics = async task => {
@@ -33,7 +70,7 @@ module.exports = fp(async (fastify, options) => {
     }
 
     const completedHour = new Date(completedAt).getHours();
-    const channel = `${task.type}:${task.runnerType || 'manual'}:${completedHour}`;
+    const channel = `${task.type}:${task.runnerType || CONFIG_CONSTANTS.RUNNER_TYPES.MANUAL}:${completedHour}`;
     const status = task.status || 'unknown';
 
     const data = { total: 1, [status]: 1 };
@@ -42,63 +79,79 @@ module.exports = fp(async (fastify, options) => {
       Object.assign(data, { waitingTime, executionTime, totalTime });
       Object.assign(unit, { waitingTime: 'ms', executionTime: 'ms', totalTime: 'ms' });
     }
-    fastify[`${options.name}Statistics`].services
-      .collect({
+
+    try {
+      await fastify[`${options.name}Statistics`].services.collect({
         channel,
         data,
         unit,
         time: completedAt
-      })
-      .catch(e => {
-        fastify.log.error(`采集任务统计数据失败: ${e.message}`);
       });
-  };
-
-  const generateSignature = ({ secret, id, data }) => {
-    const dataToSign = `${id}|${typeof data === 'string' ? data : JSON.stringify(data)}`;
-    const hmac = crypto.createHmac('sha256', secret);
-    hmac.update(dataToSign);
-    return hmac.digest('hex');
-  };
-
-  const verifySignature = ({ secret, id, data, signature }) => {
-    if (!secret) return true;
-    const expectedSignature = generateSignature({ secret, id, data });
-    return signature === expectedSignature;
+    } catch (error) {
+      fastify.log.error(`采集任务统计数据失败: ${error.message}`, { taskId: task.id, error: error.stack });
+      // 不抛出错误，避免影响主流程
+    }
   };
 
   const create = async ({ userId, input, type, targetId, targetType, runnerType, delay = 0, scriptName, priority = 0, parentTaskId, maxRetries = 0, timeout = 60, options: currentOptions }) => {
-    if (typeof delay !== 'number' || delay < 0) {
-      throw new Error('delay 必须为非负数');
+    try {
+      // 参数验证
+      delay = SecurityValidator.validateNumber(delay, {
+        min: CONFIG_CONSTANTS.DELAY_MIN,
+        max: CONFIG_CONSTANTS.DELAY_MAX,
+        integer: true,
+        required: false
+      });
+
+      priority = SecurityValidator.validateNumber(priority, {
+        min: CONFIG_CONSTANTS.PRIORITY_MIN,
+        max: CONFIG_CONSTANTS.PRIORITY_MAX,
+        integer: true
+      });
+
+      maxRetries = SecurityValidator.validateNumber(maxRetries, {
+        min: 0,
+        max: CONFIG_CONSTANTS.RETRY_MAX_COUNT,
+        integer: true
+      });
+
+      timeout = SecurityValidator.validateNumber(timeout, {
+        min: CONFIG_CONSTANTS.TASK_TIMEOUT_MIN,
+        max: CONFIG_CONSTANTS.TASK_TIMEOUT_MAX / (60 * 1000), // 转换为分钟
+        integer: true
+      });
+
+      // 任务类型验证
+      SecurityValidator.validateTaskType(type, Object.keys(options.task || {}));
+
+      // 检查任务处理器是否存在
+      if (typeof options.task[type] !== 'function') {
+        throw new TaskValidationError('type', type, '未找到合法的任务声明');
+      }
+
+      const task = await models.task.create({
+        userId,
+        input,
+        type,
+        targetId,
+        targetType,
+        runnerType,
+        priority,
+        parentTaskId,
+        maxRetries,
+        timeout,
+        startTime: delay > 0 ? new Date(Date.now() + 1000 * delay) : new Date(),
+        scriptName,
+        options: currentOptions
+      });
+
+      return task;
+    } catch (error) {
+      if (error instanceof TaskValidationError) {
+        throw error;
+      }
+      throw new TaskExecutionError(null, error, { operation: 'create' });
     }
-    if (typeof priority !== 'number' || !Number.isInteger(priority)) {
-      throw new Error('priority 必须为整数');
-    }
-    if (typeof maxRetries !== 'number' || !Number.isInteger(maxRetries) || maxRetries < 0) {
-      throw new Error('maxRetries 必须为非负整数');
-    }
-    if (typeof timeout !== 'number' || !Number.isInteger(timeout) || timeout < 0) {
-      throw new Error('timeout 必须为非负整数');
-    }
-    if (typeof options.task[type] !== 'function') {
-      throw new Error('未找到合法的任务声明');
-    }
-    const task = await models.task.create({
-      userId,
-      input,
-      type,
-      targetId,
-      targetType,
-      runnerType,
-      priority,
-      parentTaskId,
-      maxRetries,
-      timeout,
-      startTime: delay > 0 ? new Date(Date.now() + 1000 * delay) : new Date(),
-      scriptName,
-      options: currentOptions
-    });
-    return task;
   };
 
   const resetAll = async () => {
@@ -114,113 +167,59 @@ module.exports = fp(async (fastify, options) => {
   };
 
   const executor = async ({ type, scriptName, ...props }) => {
-    const scriptFile = `${scriptName || options.scriptName}.js`;
-    let taskModulePath = null;
-    for (const dir of options.dirs) {
-      const candidate = path.resolve(dir, type, scriptFile);
-      if (await fs.exists(candidate)) {
-        taskModulePath = candidate;
-        break;
-      }
-    }
-    if (!taskModulePath) {
-      throw new Error(`未匹配到任务执行器:${type}/${scriptFile}，已搜索目录:${options.dirs.join(',')}`);
-    }
-    // 清除 require 缓存，确保运行期间模块更新后能加载最新版本
-    delete require.cache[taskModulePath];
-    return await require(taskModulePath)(fastify, options, {
-      ...props,
-      updateProgress: async progress => {
-        typeof props?.task?.update === 'function' &&
-          (await props.task.update({
-            progress: progress
-          }));
-      },
-      polling: async (callback, currentOptions) => {
-        let pollCount = 0;
-        const maxPollTimes = currentOptions?.maxPollTimes || options.maxPollTimes;
-        const pollInterval = currentOptions?.pollInterval || options.pollInterval;
-        return await new Promise((resolve, reject) => {
-          const executePolling = async () => {
-            try {
-              pollCount++;
-              if (pollCount > maxPollTimes) {
-                reject(new Error(`轮询超时（${maxPollTimes}次），任务未完成`));
-                return;
-              }
-
-              const pollingResult = Object.assign({}, await callback());
-              const { result, data, message, progress } = pollingResult;
-
-              if (typeof props?.task?.update === 'function') {
-                await props.task.reload();
-                await props.task.update(
-                  Object.assign(
-                    {},
-                    {
-                      pollCount: props.task.pollCount + 1,
-                      pollResults: [...props.task.pollResults, Object.assign({}, pollingResult, { time: new Date() })]
-                    },
-                    Number.isInteger(progress) ? { progress } : {}
-                  )
-                );
-              }
-
-              if (result === 'failed') {
-                reject(new Error(`任务处理失败:${message}`));
-                return;
-              }
-
-              if (result === 'success') {
-                resolve(data);
-                return;
-              }
-
-              // 任务未完成，等待pollInterval后继续执行
-              setTimeout(executePolling, pollInterval);
-            } catch (e) {
-              reject(e);
-            }
-          };
-          // 开始第一次轮询
-          setTimeout(executePolling, pollInterval);
-        });
-      },
-      next: async context => {
-        if (typeof props?.task?.update === 'function') {
-          await props.task.update({ context, status: 'waiting' });
-        }
-        return false;
-      }
-    });
+    return await taskExecutor.execute({ type, scriptName, ...props });
   };
 
   const processNext = async ({ id, signature, result: resultStr }) => {
-    const task = await detail({ id });
-    if (task.status !== 'waiting') {
-      throw new Error('当前任务状态不允许执行Next操作');
-    }
-    if (task.context?.secret && !verifySignature({ secret: task.context.secret, id, data: resultStr, signature })) {
-      throw new Error('签名验证失败');
-    }
-    const result = JSON.parse(resultStr);
-    if (result.code !== 0) {
+    try {
+      const task = await detail({ id });
+
+      if (task.status !== CONFIG_CONSTANTS.TASK_STATUSES.WAITING) {
+        throw new TaskStatusError(id, task.status, CONFIG_CONSTANTS.TASK_STATUSES.WAITING);
+      }
+
+      // 签名验证
+      if (task.context?.secret && config.security.enableSignature) {
+        if (!SecurityValidator.verifySignature({
+          secret: task.context.secret,
+          id,
+          data: resultStr,
+          signature
+        })) {
+          throw new TaskValidationError('signature', signature, '签名验证失败');
+        }
+      }
+
+      const result = SecurityValidator.safeJSONParse(resultStr);
+      if (!result || typeof result !== 'object') {
+        throw new TaskValidationError('result', resultStr, '结果必须是有效的JSON对象');
+      }
+
+      if (result.code !== 0) {
+        await task.update({
+          status: CONFIG_CONSTANTS.TASK_STATUSES.FAILED,
+          error: result,
+          completedAt: new Date()
+        });
+        collectTaskStatistics(task);
+        await handleError({ task, error: result, type: 'callback' });
+        return;
+      }
+
+      await config.task[task.type]({ task, result: result.data, context: task.context });
       await task.update({
-        status: 'failed',
-        error: result,
+        status: CONFIG_CONSTANTS.TASK_STATUSES.SUCCESS,
+        output: result,
+        progress: 100,
         completedAt: new Date()
       });
       collectTaskStatistics(task);
-      return;
+    } catch (error) {
+      if (error instanceof TaskStatusError || error instanceof TaskValidationError) {
+        throw error;
+      }
+      throw new TaskExecutionError(id, error, { operation: 'processNext' });
     }
-    await options.task[task.type]({ task, result: result.data, context: task.context });
-    await task.update({
-      status: 'success',
-      output: result,
-      progress: 100,
-      completedAt: new Date()
-    });
-    collectTaskStatistics(task);
   };
 
   const processSystemTask = async task => {
@@ -289,6 +288,7 @@ module.exports = fp(async (fastify, options) => {
             retryCount: currentRetryCount
           });
           collectTaskStatistics(task);
+          await handleError({ task, error: e.message || e, type: currentRetryCount > 1 ? 'retry_exhausted' : 'execution' });
         }
       });
   };
@@ -341,6 +341,7 @@ module.exports = fp(async (fastify, options) => {
         completedAt: now
       });
       collectTaskStatistics(task);
+      await handleError({ task, error: task.error, type: 'timeout' });
     }
   };
 
@@ -348,45 +349,86 @@ module.exports = fp(async (fastify, options) => {
     // 检查超时任务
     await checkTimeout();
 
-    const runningTaskCount = await models.task.count({
-      where: {
-        runnerType: 'system',
-        status: 'running'
-      }
-    });
-    const limit = options.limit - runningTaskCount;
+    // 批量查询运行中和待处理的任务，减少数据库往返
+    const [runningTasks, pendingTasks] = await Promise.all([
+      models.task.count({
+        where: {
+          runnerType: CONFIG_CONSTANTS.RUNNER_TYPES.SYSTEM,
+          status: CONFIG_CONSTANTS.TASK_STATUSES.RUNNING
+        }
+      }),
+      models.task.findAll({
+        where: {
+          runnerType: CONFIG_CONSTANTS.RUNNER_TYPES.SYSTEM,
+          status: CONFIG_CONSTANTS.TASK_STATUSES.PENDING,
+          startTime: {
+            [Op.lte]: new Date()
+          }
+        },
+        order: [
+          ['priority', 'DESC'],
+          ['startTime', 'ASC']
+        ],
+        limit: config.limit
+      })
+    ]);
+
+    const runningTaskCount = runningTasks;
+    const limit = config.limit - runningTaskCount;
+
     if (limit <= 0) {
-      fastify.log.info(`当前运行中的系统任务数(${runningTaskCount})已达上限(${options.limit})，暂不执行新任务`);
+      fastify.log.info(`当前运行中的系统任务数(${runningTaskCount})已达上限(${config.limit})，暂不执行新任务`);
       return;
     }
-    // #1: 按优先级降序 + startTime 升序获取待处理任务
-    const pendingTasks = await models.task.findAll({
-      where: {
-        runnerType: 'system',
-        status: 'pending',
-        startTime: {
-          [Op.lte]: new Date()
-        }
-      },
-      order: [
-        ['priority', 'DESC'],
-        ['startTime', 'ASC']
-      ],
-      limit: limit
-    });
 
-    if (pendingTasks.length > 0) {
-      fastify.log.info(`本轮执行 ${pendingTasks.length} 个待处理的系统任务`);
-      // #8: await processSystemTask 返回的 Promise，防止同任务重复执行
-      await Promise.all(pendingTasks.map(async task => processSystemTask(task)));
+    // 取出可以执行的任务
+    const tasksToExecute = pendingTasks.slice(0, limit);
+
+    if (tasksToExecute.length > 0) {
+      fastify.log.info(`本轮执行 ${tasksToExecute.length} 个待处理的系统任务`);
+
+      // 批量更新任务状态为 running，防止重复执行
+      const taskIds = tasksToExecute.map(task => task.id);
+      await models.task.update(
+        { status: CONFIG_CONSTANTS.TASK_STATUSES.RUNNING, startedAt: new Date() },
+        { where: { id: { [Op.in]: taskIds } } }
+      );
+
+      // 清除相关缓存
+      taskIds.forEach(id => cacheManager.delete(`task:${id}`));
+
+      // 并行执行任务
+      await Promise.all(tasksToExecute.map(async task => {
+        try {
+          await processSystemTask(task);
+        } catch (error) {
+          fastify.log.error(`任务执行失败: ${task.id}`, { error: error.message });
+        }
+      }));
     }
   };
 
   const detail = async ({ id }) => {
+    if (!id) {
+      throw new TaskValidationError('id', id, '任务ID不能为空');
+    }
+
+    // 使用缓存优化查询
+    const cacheKey = `task:${id}`;
+    const cachedTask = cacheManager.get(cacheKey);
+
+    if (cachedTask) {
+      return cachedTask;
+    }
+
     const task = await models.task.findByPk(id);
     if (!task) {
-      throw new Error('任务不存在');
+      throw new TaskNotFoundError(id);
     }
+
+    // 缓存任务数据（短时间缓存，因为状态会变化）
+    cacheManager.set(cacheKey, task, 60000); // 1分钟缓存
+
     return task;
   };
 
@@ -458,6 +500,7 @@ module.exports = fp(async (fastify, options) => {
           })
         );
         collectTaskStatistics(task);
+        await handleError({ task, error: e.message || e, type: 'execution' });
         throw e;
       }
     } else {
@@ -470,6 +513,7 @@ module.exports = fp(async (fastify, options) => {
         })
       );
       collectTaskStatistics(task);
+      await handleError({ task, error: props.error || '任务标记为失败', type: 'callback' });
     }
   };
 
@@ -622,70 +666,129 @@ module.exports = fp(async (fastify, options) => {
   };
 
   const log = async ({ id, taskId, data, message = '' }) => {
-    const targetId = id || taskId;
-    const task = await detail({ id: targetId });
+    try {
+      const targetId = id || taskId;
+      const task = await detail({ id: targetId });
 
-    const currentOptions = task.options || {};
-    const logs = (currentOptions.logs || []).slice(0);
-    logs.splice(0, 0, {
-      data,
-      message,
-      time: new Date()
-    });
-    if (logs.length > 100) {
-      logs.splice(0, logs.length - 100);
-    }
-    await task.update({
-      options: {
-        ...currentOptions,
-        logs
+      const currentOptions = task.options || {};
+      const logs = currentOptions.logs || [];
+
+      // 性能优化：只在日志超过限制时才进行截断
+      const newLog = { data, message, time: new Date() };
+      let limitedLogs;
+
+      if (logs.length >= CONFIG_CONSTANTS.LOGS_MAX_SIZE) {
+        // 使用更高效的数组操作
+        limitedLogs = [...logs.slice(-CONFIG_CONSTANTS.LOGS_MAX_SIZE + 1), newLog];
+      } else {
+        limitedLogs = [...logs, newLog];
       }
-    });
 
-    return task;
+      await task.update({
+        options: {
+          ...currentOptions,
+          logs: limitedLogs
+        }
+      });
+
+      // 更新缓存
+      cacheManager.set(`task:${targetId}`, task, 60000);
+
+      return task;
+    } catch (error) {
+      if (error instanceof TaskNotFoundError || error instanceof TaskValidationError) {
+        throw error;
+      }
+      throw new TaskExecutionError(id || taskId, error, { operation: 'log' });
+    }
   };
 
   const logWithSignature = async ({ id, taskId, data, message = '', signature }) => {
-    const targetId = id || taskId;
-    const task = await detail({ id: targetId });
+    try {
+      const targetId = id || taskId;
+      const task = await detail({ id: targetId });
 
-    if (task.context?.secret && !verifySignature({ secret: task.context.secret, id: targetId, data: { data, message }, signature })) {
-      throw new Error('签名验证失败');
+      // 签名验证
+      if (task.context?.secret && config.security.enableSignature) {
+        if (!SecurityValidator.verifySignature({
+          secret: task.context.secret,
+          id: targetId,
+          data: { data, message },
+          signature
+        })) {
+          throw new TaskValidationError('signature', signature, '签名验证失败');
+        }
+      }
+
+      return log({ id: targetId, data, message });
+    } catch (error) {
+      if (error instanceof TaskValidationError) {
+        throw error;
+      }
+      throw new TaskExecutionError(id || taskId, error, { operation: 'logWithSignature' });
     }
-
-    return log({ id: targetId, data, message });
   };
 
   const callback = async ({ id, code, data, message }) => {
-    await detail({ id });
+    try {
+      // 参数验证
+      const validatedCode = SecurityValidator.validateNumber(code, {
+        min: 0,
+        max: Number.MAX_SAFE_INTEGER,
+        integer: true
+      });
 
-    const result = { code, data, message };
-    await log({ id, message: '回调结果', data: JSON.stringify(result) });
-    const input = Object.assign(
-      {},
-      { id },
-      code === 0
-        ? {
-            status: 'success',
-            output: data
-          }
-        : {
-            status: 'failed',
-            output: data,
-            error: message
-          }
-    );
-    await complete(input);
+      await detail({ id });
+
+      const result = { code: validatedCode, data, message };
+      await log({ id, message: '回调结果', data: JSON.stringify(result) });
+
+      const input = Object.assign(
+        {},
+        { id },
+        validatedCode === 0
+          ? {
+              status: CONFIG_CONSTANTS.TASK_STATUSES.SUCCESS,
+              output: data
+            }
+          : {
+              status: CONFIG_CONSTANTS.TASK_STATUSES.FAILED,
+              output: data,
+              error: message
+            }
+      );
+      await complete(input);
+    } catch (error) {
+      if (error instanceof TaskNotFoundError || error instanceof TaskValidationError) {
+        throw error;
+      }
+      throw new TaskExecutionError(id, error, { operation: 'callback' });
+    }
   };
 
   const callbackWithSignature = async ({ id, code, data, message, signature }) => {
-    const task = await detail({ id });
+    try {
+      const task = await detail({ id });
 
-    if (task.context?.secret && !verifySignature({ secret: task.context.secret, id, data: { code, data, message }, signature })) {
-      throw new Error('签名验证失败');
+      // 签名验证
+      if (task.context?.secret && config.security.enableSignature) {
+        if (!SecurityValidator.verifySignature({
+          secret: task.context.secret,
+          id,
+          data: { code, data, message },
+          signature
+        })) {
+          throw new TaskValidationError('signature', signature, '签名验证失败');
+        }
+      }
+
+      return callback({ id, code, data, message });
+    } catch (error) {
+      if (error instanceof TaskValidationError) {
+        throw error;
+      }
+      throw new TaskExecutionError(id, error, { operation: 'callbackWithSignature' });
     }
-
-    return callback({ id, code, data, message });
   };
 
   const append = async ({ dirs, tasks }) => {

@@ -2,25 +2,19 @@ const fp = require('fastify-plugin');
 const dayjs = require('dayjs');
 const utc = require('dayjs/plugin/utc');
 const timezone = require('dayjs/plugin/timezone');
+const {
+  CONFIG_CONSTANTS,
+  getConfigManager
+} = require('../utils/config');
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
 
-const RANGE_MAP = {
-  '7d': { value: 7, unit: 'day', label: '近7天' },
-  '1m': { value: 1, unit: 'month', label: '近1个月' },
-  '3m': { value: 3, unit: 'month', label: '近3个月' },
-  '1y': { value: 1, unit: 'year', label: '近1年' }
-};
-
-const RUNNER_TYPES = ['system', 'manual'];
-const STAT_ATTRS = ['total', 'success', 'failed', 'canceled', 'waitingTime', 'executionTime', 'totalTime'];
-
 // 查询用客户端时间：parseRange 使用客户端时区计算日期范围
 const parseRange = (range = '7d', tz) => {
-  const config = RANGE_MAP[range];
+  const config = CONFIG_CONSTANTS.TIME_RANGES[range];
   if (!config) {
-    throw new Error(`不支持的时间范围: ${range}, 支持: ${Object.keys(RANGE_MAP).join(',')}`);
+    throw new Error(`不支持的时间范围: ${range}, 支持: ${Object.keys(CONFIG_CONSTANTS.TIME_RANGES).join(',')}`);
   }
   // 写入数据全使用服务器时间，查询用客户端时间
   // 使用客户端时区计算"现在"和"起始时间"，确保日期边界对齐客户端视角
@@ -74,7 +68,7 @@ const buildChannels = async (statisticsServices, type, runnerType) => {
   const list = Array.isArray(metaResult) ? metaResult : metaResult.list || [];
   const rootChannels = list.map(meta => meta.channel).filter(Boolean);
   const types = type ? rootChannels.filter(ch => ch === type) : rootChannels;
-  const rts = runnerType ? [runnerType] : RUNNER_TYPES;
+  const rts = runnerType ? [runnerType] : [CONFIG_CONSTANTS.RUNNER_TYPES.SYSTEM, CONFIG_CONSTANTS.RUNNER_TYPES.MANUAL];
   const channels = [];
   for (const t of types) {
     channels.push(t);
@@ -98,13 +92,28 @@ const accumDuration = (acc, count, sum) => {
 };
 
 // 创建空的 dailyMap 条目
-const createDailyMapEntry = () => ({ total: 0, byStatus: { success: 0, failed: 0, canceled: 0 }, byType: {} });
+const createDailyMapEntry = () => ({
+  total: 0,
+  byStatus: {
+    [CONFIG_CONSTANTS.TASK_STATUSES.SUCCESS]: 0,
+    [CONFIG_CONSTANTS.TASK_STATUSES.FAILED]: 0,
+    [CONFIG_CONSTANTS.TASK_STATUSES.CANCELED]: 0
+  },
+  byType: {}
+});
 
 // 创建空的 dailyDurationMap 条目
 const createDailyDurationEntry = () => ({
-  completedCount: 0, successCount: 0, failedCount: 0, canceledCount: 0,
-  sumWaiting: 0, sumExecution: 0, sumTotal: 0, countWithTiming: 0,
-  byType: {}, byRunnerType: {}
+  completedCount: 0,
+  successCount: 0,
+  failedCount: 0,
+  canceledCount: 0,
+  sumWaiting: 0,
+  sumExecution: 0,
+  sumTotal: 0,
+  countWithTiming: 0,
+  byType: {},
+  byRunnerType: {}
 });
 
 // 查询 statistics 并解析结果
@@ -114,7 +123,7 @@ const queryAndParse = async (statisticsServices, { channels, startTime, endTime,
 
   const statResult = await statisticsServices.query({
     channels, startTime, endTime,
-    attributeNames: STAT_ATTRS,
+    attributeNames: CONFIG_CONSTANTS.STATISTICS_ATTRIBUTES,
     aggregates: ['sum'],
     timezone: tz || undefined
   });
