@@ -45,8 +45,8 @@ module.exports = ({ DataTypes, definePrimaryType, options }) => {
       },
       timeout: {
         type: DataTypes.INTEGER,
-        comment: '任务超时时间（分钟），0表示不超时，默认60分钟',
-        defaultValue: 60
+        comment: '任务超时时间（毫秒），0表示不超时，默认3600000ms',
+        defaultValue: 60 * 60 * 1000
       },
       startTime: {
         type: DataTypes.DATE,

@@ -253,7 +253,7 @@ const signature = generateSignature({
 | `scriptName` | string | 否 | `'index'` | 默认任务脚本名称 |
 | `maxPollTimes` | number | 否 | `20` | 最大轮询次数 |
 | `pollInterval` | number | 否 | `10000` | 轮询间隔（毫秒） |
-| `taskTimeout` | number | 否 | `1800000` | 任务执行超时时间（毫秒），0 表示不超时，默认 30 分钟 |
+| `taskTimeout` | number | 否 | `1800000` | 任务执行超时时间（毫秒），0 表示不超时 |
 | `retryBaseDelay` | number | 否 | `5000` | 重试基础延迟（毫秒），实际延迟 = `retryBaseDelay * 2^(retryCount-1)` |
 | `getUserModel` | function | 否 | - | 获取用户 Model 的函数 |
 | `getAuthenticate` | function | 否 | - | 获取认证中间件的函数 |
@@ -279,7 +279,7 @@ const signature = generateSignature({
 | priority | number | 否 | `0` | 优先级，数值越大越优先 |
 | parentTaskId | string | 否 | - | 父任务ID，用于任务依赖 |
 | maxRetries | number | 否 | `0` | 最大自动重试次数 |
-| timeout | number | 否 | `60` | 任务超时时间（分钟），0 表示不超时 |
+| timeout | number | 否 | `3600000` | 任务超时时间（毫秒），0 表示不超时 |
 
 返回值：
 
@@ -452,7 +452,7 @@ SSE 实时推送任务统计数据，需 `statistics` 权限。
 | priority | number | 否 | `0` | 优先级 |
 | parentTaskId | string | 否 | - | 父任务ID |
 | maxRetries | number | 否 | `0` | 最大重试次数 |
-| timeout | number | 否 | `60` | 超时时间（分钟） |
+| timeout | number | 否 | `3600000` | 超时时间（毫秒） |
 | options | object | 否 | - | 扩展选项 |
 
 **services.waitingComplete 参数：**
@@ -523,7 +523,7 @@ SSE 实时推送任务统计数据，需 `statistics` 权限。
 | parentTaskId | STRING | 父任务ID，用于任务依赖 |
 | retryCount | INTEGER | 已重试次数，默认 0 |
 | maxRetries | INTEGER | 最大重试次数，0 表示不自动重试 |
-| timeout | INTEGER | 任务超时时间（分钟），0 表示不超时，默认 60 |
+| timeout | INTEGER | 任务超时时间（毫秒），0 表示不超时，默认 3600000 |
 | startTime | DATE | 任务最早执行时间 |
 | startedAt | DATE | 任务实际开始执行时间 |
 | completedAt | DATE | 任务完成时间 |
@@ -593,10 +593,10 @@ SSE 实时推送任务统计数据，需 `statistics` 权限。
 每次 `runner` 执行时先调用 `checkTimeout`，扫描所有 `running` / `waiting` 且 `timeout > 0` 的任务：
 
 ```
-当前时间 - startedAt > timeout × 60 × 1000 → 标记为 failed
+当前时间 - startedAt > timeout → 标记为 failed
 ```
 
-> **关键设计**：`taskTimeout`（全局配置）和 `timeout`（任务级别，单位分钟）是两个不同概念。全局 `taskTimeout` 在 executor 执行时通过 `Promise.race` 控制；任务 `timeout` 字段在 cron 轮询时检测。
+> **关键设计**：`taskTimeout`（全局配置）和 `timeout`（任务级别）均使用毫秒作为单位。全局 `taskTimeout` 在 executor 执行时通过 `Promise.race` 控制；任务 `timeout` 字段在 cron 轮询时检测。
 
 #### 父子任务依赖
 

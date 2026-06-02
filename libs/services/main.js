@@ -67,7 +67,7 @@ module.exports = fp(async (fastify, options) => {
     return signature === expectedSignature;
   };
 
-  const create = async ({ userId, input, type, targetId, targetType, runnerType, delay = 0, scriptName, priority = 0, parentTaskId, maxRetries = 0, timeout = 60, options: currentOptions }) => {
+  const create = async ({ userId, input, type, targetId, targetType, runnerType, delay = 0, scriptName, priority = 0, parentTaskId, maxRetries = 0, timeout = 60 * 60 * 1000, options: currentOptions }) => {
     if (typeof delay !== 'number' || delay < 0) {
       throw new Error('delay 必须为非负数');
     }
@@ -101,16 +101,22 @@ module.exports = fp(async (fastify, options) => {
     return task;
   };
 
-  const resetAll = async () => {
-    const runningTasks = await models.task.findAll({
-      where: { status: 'running' },
-      attributes: ['type', 'runnerType'],
-      raw: true
-    });
-    await models.task.update(
-      { status: 'pending' },
-      { where: { status: 'running' } }
-    );
+  const getRunningRecoveryBefore = () => {
+    const recoverAfter = Number.isInteger(options.recoverRunningTaskAfter) && options.recoverRunningTaskAfter >= 0 ? options.recoverRunningTaskAfter : 30 * 60 * 1000;
+    return new Date(Date.now() - recoverAfter);
+  };
+
+  const getRunningResetWhere = ({ staleOnly = false, before } = {}) => {
+    const where = { status: 'running' };
+    if (staleOnly) {
+      where[Op.or] = [{ startedAt: { [Op.lte]: before || getRunningRecoveryBefore() } }, { startedAt: null }];
+    }
+    return where;
+  };
+
+  const resetAll = async (props = {}) => {
+    const [affectedCount] = await models.task.update({ status: 'pending' }, { where: getRunningResetWhere(props) });
+    return affectedCount;
   };
 
   const executor = async ({ type, scriptName, ...props }) => {
@@ -223,31 +229,29 @@ module.exports = fp(async (fastify, options) => {
     collectTaskStatistics(task);
   };
 
-  const processSystemTask = async task => {
-    await task.update({
-      status: 'running',
-      startedAt: new Date(),
-      progress: 0,
-      error: null,
-      output: null,
-      pollCount: 0,
-      pollResults: [],
-      completedAt: null,
-      context: {}
-    });
+  const processSystemTask = async (task, { claimed = false } = {}) => {
+    if (!claimed) {
+      await task.update({
+        status: 'running',
+        startedAt: new Date(),
+        progress: 0,
+        error: null,
+        output: null,
+        pollCount: 0,
+        pollResults: [],
+        completedAt: null,
+        context: {}
+      });
+    }
     const addLog = props => {
       return log(Object.assign({}, props, { taskId: task.id }));
     };
 
     // #3: 任务超时自动失败
-    const createTimeout = ms => new Promise((_, reject) =>
-      setTimeout(() => reject(new Error(`任务执行超时(${ms}ms)`)), ms)
-    );
+    const createTimeout = ms => new Promise((_, reject) => setTimeout(() => reject(new Error(`任务执行超时(${ms}ms)`)), ms));
 
     const executorPromise = executor({ type: task.type, scriptName: task.scriptName, task, log: addLog });
-    const racePromise = options.taskTimeout > 0
-      ? Promise.race([executorPromise, createTimeout(options.taskTimeout)])
-      : executorPromise;
+    const racePromise = options.taskTimeout > 0 ? Promise.race([executorPromise, createTimeout(options.taskTimeout)]) : executorPromise;
 
     return racePromise
       .then(async result => {
@@ -325,7 +329,7 @@ module.exports = fp(async (fastify, options) => {
 
     const tasksToFail = timedOutTasks.filter(task => {
       const elapsed = now.getTime() - new Date(task.startedAt).getTime();
-      return elapsed > task.timeout * 60 * 1000;
+      return elapsed > task.timeout;
     });
 
     if (tasksToFail.length === 0) return;
@@ -337,11 +341,64 @@ module.exports = fp(async (fastify, options) => {
       const prevStatus = task.status;
       await task.update({
         status: 'failed',
-        error: `任务超时：已执行 ${Math.round(elapsed / 60000)} 分钟，超过设定的 ${task.timeout} 分钟超时时间`,
+        error: `任务超时：已执行 ${elapsed}ms，超过设定的 ${task.timeout}ms 超时时间`,
         completedAt: now
       });
       collectTaskStatistics(task);
     }
+  };
+
+  const claimPendingTasks = async limit => {
+    if (limit <= 0) return [];
+    const now = new Date();
+    const pendingTasks = await models.task.findAll({
+      where: {
+        runnerType: 'system',
+        status: 'pending',
+        startTime: {
+          [Op.lte]: now
+        }
+      },
+      order: [
+        ['priority', 'DESC'],
+        ['startTime', 'ASC']
+      ],
+      limit: limit
+    });
+
+    const claimedTasks = [];
+    for (const task of pendingTasks) {
+      const [affectedCount] = await models.task.update(
+        {
+          status: 'running',
+          startedAt: now,
+          progress: 0,
+          error: null,
+          output: null,
+          pollCount: 0,
+          pollResults: [],
+          completedAt: null,
+          context: {}
+        },
+        {
+          where: {
+            id: task.id,
+            runnerType: 'system',
+            status: 'pending',
+            startTime: {
+              [Op.lte]: now
+            }
+          }
+        }
+      );
+      if (affectedCount === 1) {
+        const claimedTask = await models.task.findByPk(task.id);
+        if (claimedTask) {
+          claimedTasks.push(claimedTask);
+        }
+      }
+    }
+    return claimedTasks;
   };
 
   const runner = async () => {
@@ -359,26 +416,11 @@ module.exports = fp(async (fastify, options) => {
       fastify.log.info(`当前运行中的系统任务数(${runningTaskCount})已达上限(${options.limit})，暂不执行新任务`);
       return;
     }
-    // #1: 按优先级降序 + startTime 升序获取待处理任务
-    const pendingTasks = await models.task.findAll({
-      where: {
-        runnerType: 'system',
-        status: 'pending',
-        startTime: {
-          [Op.lte]: new Date()
-        }
-      },
-      order: [
-        ['priority', 'DESC'],
-        ['startTime', 'ASC']
-      ],
-      limit: limit
-    });
+    const pendingTasks = await claimPendingTasks(limit);
 
     if (pendingTasks.length > 0) {
       fastify.log.info(`本轮执行 ${pendingTasks.length} 个待处理的系统任务`);
-      // #8: await processSystemTask 返回的 Promise，防止同任务重复执行
-      await Promise.all(pendingTasks.map(async task => processSystemTask(task)));
+      await Promise.all(pendingTasks.map(async task => processSystemTask(task, { claimed: true })));
     }
   };
 
@@ -723,6 +765,7 @@ module.exports = fp(async (fastify, options) => {
     cancel,
     runner,
     resetAll,
+    claimPendingTasks,
     retry,
     log,
     logWithSignature,

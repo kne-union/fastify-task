@@ -55,7 +55,7 @@ module.exports = fp(async (fastify, options) => {
             },
             timeout: {
               type: 'number',
-              description: '任务超时时间（分钟），0表示不超时，默认60分钟'
+              description: '任务超时时间（毫秒），0表示不超时，默认3600000ms'
             }
           },
           required: ['type', 'targetId', 'targetType']
