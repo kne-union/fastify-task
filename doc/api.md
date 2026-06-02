@@ -17,6 +17,7 @@
 | `getUserModel` | function | 否 | - | 获取用户 Model 的函数 |
 | `getAuthenticate` | function | 否 | - | 获取认证中间件的函数 |
 | `task` | object | 否 | `{}` | 任务类型处理函数配置，`{ [type]: handler }` |
+| `errorHandler` | function \| null | 否 | `null` | 任务错误统一处理函数，当任务执行失败时自动调用 |
 
 > **关键设计**：`dirs` 初始化逻辑 — 优先使用用户传入的 `dirs`，否则以 `dir` 为默认值；若 `dirs` 中不包含 `dir`，则将 `dir` 插入 `dirs` 首位，保证向后兼容。
 
@@ -367,6 +368,43 @@ SSE 实时推送任务统计数据，需 `statistics` 权限。
 | `manual` | 保持 `pending`，等待手动执行 |
 
 > **关键设计**：只有父任务 **成功** 后才触发子任务，失败或取消不会激活子任务。
+
+#### 错误统一处理
+
+通过 `errorHandler` 配置项可以为所有任务失败场景设置统一的错误处理回调。当任务执行失败时，插件会自动调用 `errorHandler`，接收参数：
+
+| 参数名 | 类型 | 说明 |
+|--------|------|------|
+| `task` | Task | 任务实例 |
+| `error` | any | 错误信息 |
+| `type` | string | 错误类型 |
+
+**错误类型（type）：**
+
+| type | 说明 | 触发场景 |
+|------|------|----------|
+| `execution` | 执行错误 | 任务脚本执行异常、success handler 抛出异常 |
+| `timeout` | 超时错误 | 任务执行超过设定的超时时间 |
+| `callback` | 回调错误 | `processNext` 回调结果 `code !== 0`、手动 `complete` 标记失败 |
+| `retry_exhausted` | 重试耗尽 | 任务执行失败且已达到最大重试次数 |
+
+```javascript
+fastify.register(require('@kne/fastify-task'), {
+  errorHandler: async ({ task, error, type }) => {
+    // 统一错误处理：告警通知、监控上报等
+    console.log(`任务 ${task.id} 失败 (${type}):`, error);
+    if (type === 'timeout') {
+      // 超时告警
+    }
+    if (type === 'retry_exhausted') {
+      // 重试耗尽后发送通知
+    }
+  },
+  task: { /* ... */ }
+});
+```
+
+> **关键设计**：`errorHandler` 为可选配置，设为 `null`（默认）时不执行任何额外错误处理。`errorHandler` 内部异常会被捕获并记录日志，不会影响主流程。
 
 #### 统计数据采集
 

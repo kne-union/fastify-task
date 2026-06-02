@@ -2,6 +2,7 @@ const fp = require('fastify-plugin');
 
 module.exports = fp(async (fastify, options) => {
   const { services } = fastify[options.name];
+
   // #14: 新增创建任务的 REST 接口
   fastify.post(
     `${options.prefix}/create`,
