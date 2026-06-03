@@ -1,6 +1,6 @@
 {
   "name": "@kne/fastify-task",
-  "version": "3.0.0-alpha.6",
+  "version": "3.0.0-alpha.7",
   "description": "一个 Fastify 插件，用于任务编排、追踪任务执行状态和结果。支持系统自动执行和手动执行两种模式，提供完整的任务生命周期管理",
   "main": "index.js",
   "scripts": {
