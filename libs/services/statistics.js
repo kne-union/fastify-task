@@ -62,9 +62,12 @@ const toAvgDuration = ({ count, sumWaiting, sumExecution, sumTotal }) => ({
 
 const parseChannel = channel => {
   const parts = channel.split(':');
-  return parts.length >= 2
-    ? { type: parts[0], runnerType: parts[1] }
-    : { type: channel, runnerType: null };
+  const hour = Number(parts[2]);
+  return {
+    type: parts[0],
+    runnerType: parts.length >= 2 ? parts[1] : null,
+    completedHour: parts.length >= 3 && Number.isInteger(hour) && hour >= 0 && hour < 24 ? hour : null
+  };
 };
 
 const buildChannels = async (statisticsServices, type, runnerType) => {
@@ -79,6 +82,20 @@ const buildChannels = async (statisticsServices, type, runnerType) => {
     for (const rt of rts) channels.push(`${t}:${rt}`);
   }
   return channels;
+};
+
+const buildHourlyChannels = (channels, runnerType) => {
+  const types = [...new Set(channels.map(ch => ch.split(':')[0]).filter(Boolean))];
+  const runnerTypes = runnerType ? [runnerType] : RUNNER_TYPES;
+  const hourlyChannels = [];
+  for (const type of types) {
+    for (const rt of runnerTypes) {
+      for (let hour = 0; hour < 24; hour += 1) {
+        hourlyChannels.push(`${type}:${rt}:${hour}`);
+      }
+    }
+  }
+  return hourlyChannels;
 };
 
 // 确保时长累加器存在于 map 中
@@ -102,8 +119,47 @@ const createDailyMapEntry = () => ({ total: 0, byStatus: { success: 0, failed: 0
 const createDailyDurationEntry = () => ({
   completedCount: 0, successCount: 0, failedCount: 0, canceledCount: 0,
   sumWaiting: 0, sumExecution: 0, sumTotal: 0, countWithTiming: 0,
-  byType: {}, byRunnerType: {}
+  byType: {}, byRunnerType: {}, byTypeByRunnerType: {}
 });
+
+const createHourlyAccumulator = () => ({
+  hourlyMap: {},
+  hourlyStatusMap: {},
+  hourlyTypeMap: {},
+  hourlyDetailMap: {}
+});
+
+const mergeHourlyItem = (result, { date, hour, typeName, runnerTypeName, count, sum, includeSummary = true }) => {
+  if (includeSummary) {
+    if (!result.hourlyMap[date]) result.hourlyMap[date] = {};
+    result.hourlyMap[date][hour] = (result.hourlyMap[date][hour] || 0) + count;
+
+    if (!result.hourlyStatusMap[date]) result.hourlyStatusMap[date] = {};
+    if (!result.hourlyStatusMap[date][hour]) result.hourlyStatusMap[date][hour] = {};
+    for (const status of ['success', 'failed', 'canceled']) {
+      const sc = safeNum(sum[status]);
+      if (sc > 0) result.hourlyStatusMap[date][hour][status] = (result.hourlyStatusMap[date][hour][status] || 0) + sc;
+    }
+
+    if (!result.hourlyTypeMap[date]) result.hourlyTypeMap[date] = {};
+    if (!result.hourlyTypeMap[date][hour]) result.hourlyTypeMap[date][hour] = {};
+    if (count > 0) result.hourlyTypeMap[date][hour][typeName] = (result.hourlyTypeMap[date][hour][typeName] || 0) + count;
+  }
+
+  if (runnerTypeName) {
+    if (!result.hourlyDetailMap[date]) result.hourlyDetailMap[date] = {};
+    if (!result.hourlyDetailMap[date][hour]) result.hourlyDetailMap[date][hour] = {};
+    if (!result.hourlyDetailMap[date][hour][typeName]) result.hourlyDetailMap[date][hour][typeName] = {};
+    if (!result.hourlyDetailMap[date][hour][typeName][runnerTypeName]) {
+      result.hourlyDetailMap[date][hour][typeName][runnerTypeName] = { total: 0, success: 0, failed: 0, canceled: 0 };
+    }
+    const detail = result.hourlyDetailMap[date][hour][typeName][runnerTypeName];
+    detail.total += count;
+    detail.success += safeNum(sum.success);
+    detail.failed += safeNum(sum.failed);
+    detail.canceled += safeNum(sum.canceled);
+  }
+};
 
 // 查询 statistics 并解析结果
 // 写入数据全使用服务器时间（DB 中存储的是服务器时间），查询用客户端时间转换展示
@@ -192,19 +248,7 @@ const queryAndParse = async (statisticsServices, { channels, startTime, endTime,
 
       // 小时级趋势（仅 period='h'）
       if (isHourly) {
-        if (!result.hourlyMap[date]) result.hourlyMap[date] = {};
-        result.hourlyMap[date][hour] = (result.hourlyMap[date][hour] || 0) + count;
-
-        if (!result.hourlyStatusMap[date]) result.hourlyStatusMap[date] = {};
-        if (!result.hourlyStatusMap[date][hour]) result.hourlyStatusMap[date][hour] = {};
-        for (const status of ['success', 'failed', 'canceled']) {
-          const sc = safeNum(sum[status]);
-          if (sc > 0) result.hourlyStatusMap[date][hour][status] = (result.hourlyStatusMap[date][hour][status] || 0) + sc;
-        }
-
-        if (!result.hourlyTypeMap[date]) result.hourlyTypeMap[date] = {};
-        if (!result.hourlyTypeMap[date][hour]) result.hourlyTypeMap[date][hour] = {};
-        if (count > 0) result.hourlyTypeMap[date][hour][typeName] = (result.hourlyTypeMap[date][hour][typeName] || 0) + count;
+        mergeHourlyItem(result, { date, hour, typeName, runnerTypeName: null, count, sum });
       }
     }
 
@@ -227,22 +271,20 @@ const queryAndParse = async (statisticsServices, { channels, startTime, endTime,
         // 按日 byRunnerType 时长
         if (dailyDurationMap[date]) {
           accumDuration(ensureDurationAcc(dailyDurationMap[date].byRunnerType, runnerTypeName), count, sum);
+          if (!dailyDurationMap[date].byTypeByRunnerType[runnerTypeName]) {
+            dailyDurationMap[date].byTypeByRunnerType[runnerTypeName] = {};
+          }
+          accumDuration(
+            ensureDurationAcc(dailyDurationMap[date].byTypeByRunnerType[runnerTypeName], typeName),
+            count,
+            sum
+          );
         }
       }
 
       // hourlyDetailMap（仅 period='h'）
       if (isHourly) {
-        if (!result.hourlyDetailMap[date]) result.hourlyDetailMap[date] = {};
-        if (!result.hourlyDetailMap[date][hour]) result.hourlyDetailMap[date][hour] = {};
-        if (!result.hourlyDetailMap[date][hour][typeName]) result.hourlyDetailMap[date][hour][typeName] = {};
-        if (!result.hourlyDetailMap[date][hour][typeName][runnerTypeName]) {
-          result.hourlyDetailMap[date][hour][typeName][runnerTypeName] = { total: 0, success: 0, failed: 0, canceled: 0 };
-        }
-        const detail = result.hourlyDetailMap[date][hour][typeName][runnerTypeName];
-        detail.total += count;
-        detail.success += safeNum(sum.success);
-        detail.failed += safeNum(sum.failed);
-        detail.canceled += safeNum(sum.canceled);
+        mergeHourlyItem(result, { date, hour, typeName, runnerTypeName, count, sum, includeSummary: false });
       }
     }
   }
@@ -260,8 +302,47 @@ const queryAndParse = async (statisticsServices, { channels, startTime, endTime,
       avgExecutionTime: computeAvg(dd.sumExecution, dd.countWithTiming),
       avgTotalTime: computeAvg(dd.sumTotal, dd.countWithTiming),
       byType: Object.fromEntries(Object.entries(dd.byType).map(([n, td]) => [n, toAvgDuration(td)])),
-      byRunnerType: Object.fromEntries(Object.entries(dd.byRunnerType).map(([n, rt]) => [n, toAvgDuration(rt)]))
+      byRunnerType: Object.fromEntries(Object.entries(dd.byRunnerType).map(([n, rt]) => [n, toAvgDuration(rt)])),
+      byTypeByRunnerType: Object.fromEntries(
+        Object.entries(dd.byTypeByRunnerType).map(([rtName, types]) => [
+          rtName,
+          Object.fromEntries(Object.entries(types).map(([typeName, td]) => [typeName, toAvgDuration(td)]))
+        ])
+      )
     }));
+
+  return result;
+};
+
+const queryHourlyChildChannels = async (statisticsServices, { channels, startTime, endTime, timezone: tz, runnerType: runnerTypeFilter }) => {
+  const hourlyChannels = buildHourlyChannels(channels, runnerTypeFilter);
+  if (hourlyChannels.length === 0) return null;
+
+  const statResult = await statisticsServices.query({
+    channels: hourlyChannels, startTime, endTime,
+    attributeNames: STAT_ATTRS,
+    aggregates: ['sum'],
+    timezone: tz || undefined
+  });
+
+  const result = createHourlyAccumulator();
+  for (const item of statResult.list || []) {
+    const { type: typeName, runnerType: runnerTypeName, completedHour } = parseChannel(item.channel);
+    if (completedHour == null) continue;
+    if (runnerTypeFilter && runnerTypeName !== runnerTypeFilter) continue;
+
+    const sum = getSumData(item);
+    const count = safeNum(sum.total);
+    const date = formatDate(item.time, tz);
+    mergeHourlyItem(result, {
+      date,
+      hour: completedHour,
+      typeName,
+      runnerTypeName,
+      count,
+      sum
+    });
+  }
 
   return result;
 };
@@ -377,9 +458,10 @@ module.exports = fp(async (fastify, options) => {
       const channels = await buildChannels(statisticsServices, type, runnerType);
       const parsed = await queryAndParse(statisticsServices, { channels, startTime, endTime, timezone, runnerType });
       if (!parsed) return emptyResult;
+      const hourlyParsed = await queryHourlyChildChannels(statisticsServices, { channels, startTime, endTime, timezone, runnerType });
 
       const { recentTrend, recentTrendByStatus, recentTrendByType } = buildDailyTrendArrays(parsed);
-      const { hourlyTrend, hourlyCompletionTrend } = buildHourlyTrendArrays(parsed);
+      const { hourlyTrend, hourlyCompletionTrend } = buildHourlyTrendArrays(hourlyParsed || createHourlyAccumulator());
 
       return {
         range: rangeKey, rangeLabel: label,

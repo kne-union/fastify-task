@@ -475,6 +475,61 @@ describe('@kne/fastify-task - statistics core queries', function () {
       expect(Array.isArray(result.hourlyCompletionTrend)).to.be.true;
     });
 
+    it('should build hourly trend from aggregated child hour channels', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+      const day = new Date('2026-05-26T00:00:00.000Z');
+      fastify.taskStatistics.services.query.onFirstCall().resolves({
+        list: [
+          {
+            channel: 'test-type',
+            period: 'd',
+            time: day,
+            data: { sum: { total: 3, success: 2, failed: 1, canceled: 0 } }
+          },
+          {
+            channel: 'test-type:manual',
+            period: 'd',
+            time: day,
+            data: { sum: { total: 3, success: 2, failed: 1, canceled: 0 } }
+          }
+        ]
+      });
+      fastify.taskStatistics.services.query.onSecondCall().resolves({
+        list: [
+          {
+            channel: 'test-type:manual:9',
+            period: 'd',
+            time: day,
+            data: { sum: { total: 3, success: 2, failed: 1, canceled: 0 } }
+          }
+        ]
+      });
+
+      const result = await fastify.task.services.queryStatistics({ range: '1m' });
+
+      expect(fastify.taskStatistics.services.query.secondCall.args[0].includeChildren).to.be.undefined;
+      expect(fastify.taskStatistics.services.query.secondCall.args[0].channels).to.include('test-type:manual:9');
+      expect(result.hourlyTrend).to.deep.include({
+        date: '2026-05-26',
+        hour: 9,
+        total: 3,
+        success: 2,
+        failed: 1,
+        canceled: 0
+      });
+      expect(result.hourlyCompletionTrend).to.deep.include({
+        date: '2026-05-26',
+        hour: 9,
+        type: 'test-type',
+        runnerType: 'manual',
+        totalCompleted: 3,
+        successCount: 2,
+        failedCount: 1,
+        canceledCount: 0
+      });
+    });
+
     it('should build duration trend from statistics', async () => {
       fastify = await createFastify();
       await fastify.ready();
@@ -492,6 +547,9 @@ describe('@kne/fastify-task - statistics core queries', function () {
         expect(trendItem).to.have.property('avgTotalTime');
         expect(trendItem).to.have.property('byType');
         expect(trendItem).to.have.property('byRunnerType');
+        expect(trendItem).to.have.property('byTypeByRunnerType');
+        expect(trendItem.byTypeByRunnerType.manual['test-type'].count).to.equal(7);
+        expect(trendItem.byTypeByRunnerType.system['test-type'].count).to.equal(6);
       }
     });
 
@@ -629,29 +687,39 @@ describe('@kne/fastify-task - statistics core queries', function () {
       await fastify.ready();
       const now = new Date();
       const hourAgo = new Date(now.getTime() - 3600000);
-      fastify.taskStatistics.services.query.resolves({
+      fastify.taskStatistics.services.query.onFirstCall().resolves({
         list: [
           {
             channel: 'test-type',
-            period: 'h',
+            period: 'd',
             time: hourAgo,
             data: { sum: { total: 2, success: 1, failed: 1, canceled: 0, waitingTime: 500, executionTime: 1000, totalTime: 1500 } }
           },
           {
             channel: 'test-type',
-            period: 'h',
+            period: 'd',
             time: now,
             data: { sum: { total: 3, success: 2, failed: 0, canceled: 1, waitingTime: 800, executionTime: 1500, totalTime: 2300 } }
-          },
+          }
+        ]
+      });
+      fastify.taskStatistics.services.query.onSecondCall().resolves({
+        list: [
           {
-            channel: 'test-type:manual',
-            period: 'h',
+            channel: 'test-type:manual:8',
+            period: 'd',
             time: hourAgo,
             data: { sum: { total: 1, success: 1, failed: 0, canceled: 0, waitingTime: 300, executionTime: 800, totalTime: 1100 } }
           },
           {
-            channel: 'test-type:system',
-            period: 'h',
+            channel: 'test-type:manual:9',
+            period: 'd',
+            time: hourAgo,
+            data: { sum: { total: 1, success: 1, failed: 0, canceled: 0, waitingTime: 300, executionTime: 800, totalTime: 1100 } }
+          },
+          {
+            channel: 'test-type:system:10',
+            period: 'd',
             time: now,
             data: { sum: { total: 1, success: 0, failed: 1, canceled: 0, waitingTime: 200, executionTime: 600, totalTime: 800 } }
           }
