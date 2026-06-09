@@ -4,7 +4,7 @@ const getTaskServiceContext = require('../helpers/task-service-context');
 module.exports = fp(async (fastify, options) => {
   const context = getTaskServiceContext(fastify, options);
   const { models, Op } = context;
-  const SORTABLE_FIELDS = new Set(['id', 'targetId', 'targetType', 'targetName', 'type', 'status', 'runnerType', 'priority', 'createdAt', 'updatedAt', 'startTime', 'startedAt', 'completedAt']);
+  const SORTABLE_FIELDS = new Set(['id', 'targetId', 'targetType', 'type', 'status', 'runnerType', 'priority', 'createdAt', 'updatedAt', 'startTime', 'startedAt', 'completedAt']);
 
   const cancel = async ({ id, targetId, targetType, type }) => {
     if (!id && !(targetId && targetType && type)) {
@@ -150,12 +150,6 @@ module.exports = fp(async (fastify, options) => {
         whereQuery[key] = filter[key];
       }
     });
-
-    if (filter && filter.targetName) {
-      whereQuery['input.name'] = {
-        [Op.like]: `%${filter.targetName}%`
-      };
-    }
 
     if (filter && filter.createdAt) {
       whereQuery.createdAt = getTimeQuery(filter.createdAt);

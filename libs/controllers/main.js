@@ -94,9 +94,6 @@ module.exports = fp(async (fastify, options) => {
                 targetId: {
                   type: 'string'
                 },
-                targetName: {
-                  type: 'string'
-                },
                 type: {
                   type: 'string'
                 },
