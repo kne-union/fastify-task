@@ -23,18 +23,41 @@ module.exports = fp(async (fastify, options) => {
     return affectedCount;
   };
 
-  const processSystemTask = async (task, { claimed = false } = {}) => {
-    if (!claimed) {
-      await task.update({
+  const claimTask = async (task, { allowChild = false } = {}) => {
+    const now = new Date();
+    const [affectedCount] = await models.task.update(
+      {
         status: 'running',
-        startedAt: new Date(),
+        startedAt: now,
         progress: 0,
         error: null,
         output: null,
         pollCount: 0,
         pollResults: [],
         completedAt: null
-      });
+      },
+      {
+        where: Object.assign(
+          {
+            id: task.id,
+            runnerType: 'system',
+            status: 'pending',
+            startTime: {
+              [Op.lte]: now
+            }
+          },
+          allowChild ? {} : { parentTaskId: null }
+        )
+      }
+    );
+    if (affectedCount !== 1) return null;
+    return await models.task.findByPk(task.id);
+  };
+
+  const processSystemTask = async (task, { claimed = false } = {}) => {
+    if (!claimed) {
+      task = await claimTask(task, { allowChild: true });
+      if (!task) return false;
     }
     const addLog = props => {
       return fastify[options.name].services.log(Object.assign({}, props, { taskId: task.id }));
@@ -55,17 +78,23 @@ module.exports = fp(async (fastify, options) => {
       .catch(async e => {
         const currentRetryCount = (task.retryCount || 0) + 1;
         const maxRetries = task.maxRetries || 0;
-        if (currentRetryCount < maxRetries) {
+        if (currentRetryCount <= maxRetries) {
           const baseDelay = options.retryBaseDelay || 5000;
           const backoffDelay = baseDelay * Math.pow(2, currentRetryCount - 1);
-          await task.update({
-            status: 'pending',
-            retryCount: currentRetryCount,
-            error: (e.stack || '').replaceAll(process.cwd(), '/server'),
-            startTime: new Date(Date.now() + backoffDelay),
-            completedAt: null
+          const retryScheduled = await context.updateTaskByStatus({
+            task,
+            allowedStatuses: ['running'],
+            updateData: {
+              status: 'pending',
+              retryCount: currentRetryCount,
+              error: (e.stack || '').replaceAll(process.cwd(), '/server'),
+              startTime: new Date(Date.now() + backoffDelay),
+              completedAt: null
+            }
           });
-          fastify.log.info(`任务 ${task.id} 第 ${currentRetryCount} 次重试，${backoffDelay}ms 后执行`);
+          if (retryScheduled) {
+            fastify.log.info(`任务 ${task.id} 第 ${currentRetryCount} 次重试，${backoffDelay}ms 后执行`);
+          }
         } else {
           await context.failTask({ task, error: e, updateData: { retryCount: currentRetryCount } });
         }
@@ -121,6 +150,7 @@ module.exports = fp(async (fastify, options) => {
       where: {
         runnerType: 'system',
         status: 'pending',
+        parentTaskId: null,
         startTime: {
           [Op.lte]: now
         }
@@ -150,6 +180,7 @@ module.exports = fp(async (fastify, options) => {
             id: task.id,
             runnerType: 'system',
             status: 'pending',
+            parentTaskId: null,
             startTime: {
               [Op.lte]: now
             }
@@ -192,6 +223,7 @@ module.exports = fp(async (fastify, options) => {
     runner,
     resetAll,
     claimPendingTasks,
+    claimTask,
     triggerChildTasks,
     processSystemTask
   });

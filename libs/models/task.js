@@ -55,7 +55,7 @@ module.exports = ({ DataTypes, definePrimaryType, options }) => {
       startTime: {
         type: DataTypes.DATE,
         comment: '任务最早执行时间',
-        defaultValue: new Date()
+        defaultValue: DataTypes.NOW
       },
       startedAt: {
         type: DataTypes.DATE,

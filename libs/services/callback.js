@@ -12,7 +12,13 @@ module.exports = fp(async (fastify, options) => {
     if (task.context?.secret && !context.verifySignature({ secret: task.context.secret, id, data: resultStr, signature })) {
       throw new Error('签名验证失败');
     }
-    const result = JSON.parse(resultStr);
+    let result;
+    try {
+      result = JSON.parse(resultStr);
+    } catch (e) {
+      await context.failTask({ task, error: e });
+      throw e;
+    }
     if (result.code !== 0) {
       await context.failTask({ task, error: result });
       return;
@@ -82,14 +88,15 @@ module.exports = fp(async (fastify, options) => {
     await fastify[options.name].services.complete(input);
   };
 
-  const callbackWithSignature = async ({ id, code, data, message, signature }) => {
-    const task = await context.detail({ id });
+  const callbackWithSignature = async ({ id, taskId, code, data, message, signature }) => {
+    const targetId = id || taskId;
+    const task = await context.detail({ id: targetId });
 
-    if (task.context?.secret && !context.verifySignature({ secret: task.context.secret, id, data: { code, data, message }, signature })) {
+    if (task.context?.secret && !context.verifySignature({ secret: task.context.secret, id: targetId, data: { code, data, message }, signature })) {
       throw new Error('签名验证失败');
     }
 
-    return callback({ id, code, data, message });
+    return callback({ id: targetId, code, data, message });
   };
 
   Object.assign(fastify[options.name].services, {

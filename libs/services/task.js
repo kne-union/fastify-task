@@ -4,6 +4,7 @@ const getTaskServiceContext = require('../helpers/task-service-context');
 module.exports = fp(async (fastify, options) => {
   const context = getTaskServiceContext(fastify, options);
   const { models, Op } = context;
+  const SORTABLE_FIELDS = new Set(['id', 'targetId', 'targetType', 'targetName', 'type', 'status', 'runnerType', 'priority', 'createdAt', 'updatedAt', 'startTime', 'startedAt', 'completedAt']);
 
   const cancel = async ({ id, targetId, targetType, type }) => {
     if (!id && !(targetId && targetType && type)) {
@@ -36,13 +37,17 @@ module.exports = fp(async (fastify, options) => {
     }
     if (id) {
       const task = await context.detail({ id });
-      if (!['pending', 'running'].includes(task.status)) {
+      const transitioned = await context.updateTaskByStatus({
+        task,
+        allowedStatuses: ['pending', 'running'],
+        updateData: {
+          status: 'canceled',
+          completedAt: new Date()
+        }
+      });
+      if (!transitioned) {
         return;
       }
-      await task.update({
-        status: 'canceled',
-        completedAt: new Date()
-      });
       context.collectTaskStatistics(task);
     }
   };
@@ -65,8 +70,16 @@ module.exports = fp(async (fastify, options) => {
     let task = await context.detail({ id });
 
     if (task.status === 'pending') {
-      await task.update({ priority: Number.MAX_SAFE_INTEGER });
-      await fastify[options.name].services.processSystemTask(task);
+      await context.updateTaskByStatus({
+        task,
+        allowedStatuses: ['pending'],
+        updateData: { priority: Number.MAX_SAFE_INTEGER }
+      });
+      const claimedTask = await fastify[options.name].services.claimTask(task);
+      if (claimedTask) {
+        await fastify[options.name].services.processSystemTask(claimedTask, { claimed: true });
+        task = claimedTask;
+      }
       await task.reload();
     }
 
@@ -155,7 +168,16 @@ module.exports = fp(async (fastify, options) => {
     let order = [['createdAt', 'DESC']];
 
     if (sort && Object.keys(sort).length > 0) {
-      order = Object.entries(sort).map(([key, direction]) => [key, direction]);
+      order = Object.entries(sort).map(([key, direction]) => {
+        if (!SORTABLE_FIELDS.has(key)) {
+          throw new Error(`不支持的排序字段:${key}`);
+        }
+        const normalizedDirection = String(direction || '').toUpperCase();
+        if (!['ASC', 'DESC'].includes(normalizedDirection)) {
+          throw new Error(`不支持的排序方向:${direction}`);
+        }
+        return [key, normalizedDirection];
+      });
     }
 
     const { rows, count } = await models.task.findAndCountAll({

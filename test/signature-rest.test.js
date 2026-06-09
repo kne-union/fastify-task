@@ -441,6 +441,49 @@ describe('@kne/fastify-task - signatures and rest endpoints', function () {
       expect(task.status).to.equal('success');
     });
 
+    it('POST /callback should accept taskId from query', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+
+      const created = await fastify.task.services.create({
+        type: 'test-type',
+        targetId: 'target-1',
+        targetType: 'document'
+      });
+
+      const response = await fastify.inject({
+        method: 'POST',
+        url: `/api/task/callback?taskId=${created.id}`,
+        payload: { code: 0, data: { result: 'done' }, message: 'Success' }
+      });
+      expect(response.statusCode).to.equal(200);
+
+      const task = await fastify.task.services.detail({ id: created.id });
+      expect(task.status).to.equal('success');
+    });
+
+    it('POST /callback should not overwrite canceled task', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+
+      const created = await fastify.task.services.create({
+        type: 'test-type',
+        targetId: 'target-1',
+        targetType: 'document'
+      });
+      await created.update({ status: 'canceled' });
+
+      const response = await fastify.inject({
+        method: 'POST',
+        url: '/api/task/callback',
+        payload: { id: created.id, code: 0, data: { result: 'done' }, message: 'Success' }
+      });
+      expect(response.statusCode).to.equal(200);
+
+      const task = await fastify.task.services.detail({ id: created.id });
+      expect(task.status).to.equal('canceled');
+    });
+
     it('POST /cancel should cancel task by id via REST', async () => {
       fastify = await createFastify();
       await fastify.ready();
@@ -477,6 +520,31 @@ describe('@kne/fastify-task - signatures and rest endpoints', function () {
         id: created.id,
         result: resultStr
       });
+
+      const task = await fastify.task.services.detail({ id: created.id });
+      expect(task.status).to.equal('failed');
+    });
+
+    it('should fail waiting task when processNext receives invalid JSON', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+
+      const created = await fastify.task.services.create({
+        type: 'test-type',
+        targetId: 'target-1',
+        targetType: 'document'
+      });
+      await created.update({ status: 'waiting', context: {} });
+
+      try {
+        await fastify.task.services.processNext({
+          id: created.id,
+          result: '{invalid-json'
+        });
+        throw new Error('Should have thrown');
+      } catch (e) {
+        expect(e.message).to.include('JSON');
+      }
 
       const task = await fastify.task.services.detail({ id: created.id });
       expect(task.status).to.equal('failed');

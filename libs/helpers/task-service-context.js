@@ -3,6 +3,9 @@ const fs = require('fs-extra');
 const crypto = require('node:crypto');
 
 const CONTEXT_KEY = Symbol.for('@kne/fastify-task.serviceContext');
+const TERMINAL_STATUSES = ['success', 'failed', 'canceled'];
+const ACTIVE_STATUSES = ['pending', 'running', 'waiting'];
+const SCRIPT_NAME_REG = /^[A-Za-z0-9_-]+$/;
 
 const createContext = (fastify, options) => {
   const { models } = fastify[options.name];
@@ -65,7 +68,17 @@ const createContext = (fastify, options) => {
   const verifySignature = ({ secret, id, data, signature }) => {
     if (!secret) return true;
     const expectedSignature = generateSignature({ secret, id, data });
-    return signature === expectedSignature;
+    if (typeof signature !== 'string' || signature.length !== expectedSignature.length) {
+      return false;
+    }
+    return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expectedSignature));
+  };
+
+  const validateScriptName = scriptName => {
+    if (scriptName == null) return;
+    if (typeof scriptName !== 'string' || !SCRIPT_NAME_REG.test(scriptName)) {
+      throw new Error('scriptName 只能包含字母、数字、下划线或中划线');
+    }
   };
 
   const normalizeDirs = ({ dir, dirs } = {}) => {
@@ -246,6 +259,29 @@ const createContext = (fastify, options) => {
     return task;
   };
 
+  const isTerminalStatus = status => TERMINAL_STATUSES.includes(status);
+
+  const updateTaskByStatus = async ({ task, allowedStatuses = ACTIVE_STATUSES, updateData }) => {
+    const [affectedCount] = await models.task.update(updateData, {
+      where: {
+        id: task.id,
+        status: {
+          [Op.in]: allowedStatuses
+        }
+      }
+    });
+    if (affectedCount !== 1) {
+      if (task.reload && typeof task.reload === 'function') {
+        await task.reload();
+      }
+      return false;
+    }
+    if (task.reload && typeof task.reload === 'function') {
+      await task.reload();
+    }
+    return true;
+  };
+
   const handleTaskError = async ({ task, error }) => {
     const declaration = resolveTaskDeclaration(task.type);
     let currentError = error;
@@ -268,17 +304,23 @@ const createContext = (fastify, options) => {
     }
   };
 
-  const failTask = async ({ task, error, updateData = {}, collect = true }) => {
-    await task.update(
-      Object.assign({}, updateData, {
+  const failTask = async ({ task, error, updateData = {}, collect = true, allowedStatuses = ACTIVE_STATUSES }) => {
+    const transitioned = await updateTaskByStatus({
+      task,
+      allowedStatuses,
+      updateData: Object.assign({}, updateData, {
         status: 'failed',
         error: normalizeError(error),
         completedAt: new Date(),
         startedAt: task.startedAt || task.createdAt
       })
-    );
+    });
+    if (!transitioned) {
+      return false;
+    }
     await handleTaskError({ task, error });
     if (collect) collectTaskStatistics(task);
+    return true;
   };
 
   const create = async ({ userId, input, type, targetId, targetType, targetName, runnerType, delay = 0, scriptName, priority = 0, parentTaskId, maxRetries = 0, timeout = 60 * 60 * 1000, context, options: currentOptions }) => {
@@ -294,6 +336,7 @@ const createContext = (fastify, options) => {
     if (typeof timeout !== 'number' || !Number.isInteger(timeout) || timeout < 0) {
       throw new Error('timeout 必须为非负整数');
     }
+    validateScriptName(scriptName);
     const declaration = getTaskDeclaration(type);
     return await models.task.create({
       userId,
@@ -316,7 +359,9 @@ const createContext = (fastify, options) => {
 
   const executor = async ({ type, scriptName, ...props }) => {
     const declaration = getTaskDeclaration(type);
-    const scriptFile = `${scriptName || declaration.scriptName || 'index'}.js`;
+    const currentScriptName = scriptName || declaration.scriptName || 'index';
+    validateScriptName(currentScriptName);
+    const scriptFile = `${currentScriptName}.js`;
     let taskModulePath = null;
     const dirs = declaration.useGlobalDirs ? options.dirs : declaration.dirs && declaration.dirs.length > 0 ? declaration.dirs : options.dirs;
     for (const dir of dirs) {
@@ -333,10 +378,13 @@ const createContext = (fastify, options) => {
     return await require(taskModulePath)(fastify, options, {
       ...props,
       updateProgress: async progress => {
-        typeof props?.task?.update === 'function' &&
-          (await props.task.update({
+        if (typeof props?.task?.update === 'function') {
+          await props.task.reload();
+          if (isTerminalStatus(props.task.status)) return;
+          await props.task.update({
             progress: progress
-          }));
+          });
+        }
       },
       polling: async (callback, currentOptions) => {
         let pollCount = 0;
@@ -356,6 +404,10 @@ const createContext = (fastify, options) => {
 
               if (typeof props?.task?.update === 'function') {
                 await props.task.reload();
+                if (isTerminalStatus(props.task.status)) {
+                  reject(new Error(`任务已结束:${props.task.status}`));
+                  return;
+                }
                 await props.task.update(
                   Object.assign(
                     {},
@@ -388,6 +440,8 @@ const createContext = (fastify, options) => {
       },
       next: async currentContext => {
         if (typeof props?.task?.update === 'function') {
+          await props.task.reload();
+          if (isTerminalStatus(props.task.status)) return false;
           await props.task.update({ context: currentContext, status: 'waiting' });
         }
         return false;
@@ -441,13 +495,9 @@ const createContext = (fastify, options) => {
 
   const finalizeSuccess = async ({ task, output, handlerResult, userId, updateData = {} }) => {
     const declaration = getTaskDeclaration(task.type);
-    const handler = getTaskHandler(declaration);
-    if (typeof handler === 'function') {
-      await handler({ task, result: handlerResult === undefined ? output : handlerResult, context: task.context });
-    }
-    await createNextTask({ task, declaration, output });
-    await task.update(
-      Object.assign({}, updateData, {
+    const transitioned = await updateTaskByStatus({
+      task,
+      updateData: Object.assign({}, updateData, {
         status: 'success',
         output,
         progress: 100,
@@ -455,9 +505,23 @@ const createContext = (fastify, options) => {
         startedAt: task.startedAt || task.createdAt,
         completedUserId: userId
       })
-    );
+    });
+    if (!transitioned) {
+      return false;
+    }
+    const handler = getTaskHandler(declaration);
+    try {
+      if (typeof handler === 'function') {
+        await handler({ task, result: handlerResult === undefined ? output : handlerResult, context: task.context });
+      }
+      await createNextTask({ task, declaration, output });
+    } catch (e) {
+      await failTask({ task, error: e, updateData: { output, completedUserId: userId }, allowedStatuses: ['success'] });
+      throw e;
+    }
     collectTaskStatistics(task);
     await fastify[options.name].services.triggerChildTasks(task);
+    return true;
   };
 
   return {
@@ -468,6 +532,9 @@ const createContext = (fastify, options) => {
     mainNamespace,
     collectTaskStatistics,
     verifySignature,
+    validateScriptName,
+    isTerminalStatus,
+    updateTaskByStatus,
     normalizeDirs,
     registerTaskDeclaration,
     getTaskDeclaration,
