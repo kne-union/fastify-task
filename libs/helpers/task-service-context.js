@@ -323,7 +323,7 @@ const createContext = (fastify, options) => {
     return true;
   };
 
-  const create = async ({ userId, input, type, targetId, targetType, targetName, runnerType, delay = 0, scriptName, priority = 0, parentTaskId, maxRetries = 0, timeout = 60 * 60 * 1000, context, options: currentOptions }) => {
+  const create = async ({ userId, input, type, targetId, targetType, runnerType, delay = 0, scriptName, priority = 0, parentTaskId, maxRetries = 0, timeout = 60 * 60 * 1000, context, options: currentOptions }) => {
     if (typeof delay !== 'number' || delay < 0) {
       throw new Error('delay 必须为非负数');
     }
@@ -344,7 +344,6 @@ const createContext = (fastify, options) => {
       type: declaration.type,
       targetId,
       targetType,
-      targetName,
       runnerType,
       priority,
       parentTaskId,
@@ -485,7 +484,6 @@ const createContext = (fastify, options) => {
       type: nextDeclaration.type,
       targetId: task.id,
       targetType: 'task',
-      targetName: task.input?.name || task.targetName,
       runnerType: task.runnerType,
       input,
       context: cloneJsonValue(task.context || {}),

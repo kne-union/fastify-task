@@ -25,10 +25,8 @@ const parseRange = (range = '7d', tz) => {
   // 写入数据全使用服务器时间，查询用客户端时间
   // 使用客户端时区计算"现在"和"起始时间"，确保日期边界对齐客户端视角
   const now = tz ? dayjs().tz(tz) : dayjs();
-  const unitStartMap = { day: 'day', month: 'month', year: 'year' };
-  const startUnit = unitStartMap[config.unit];
-  const startTime = startUnit
-    ? now.subtract(config.value, startUnit).startOf(startUnit)
+  const startTime = config.unit === 'day'
+    ? now.subtract(config.value, config.unit).startOf('day')
     : now.subtract(config.value, config.unit);
   return { startTime: startTime.toDate(), endTime: now.toDate(), label: config.label, range };
 };

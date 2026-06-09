@@ -504,7 +504,6 @@ const signature = generateSignature({
 | type         | string | 是  | -         | 任务类型，必须已在主项目或 `append` 中声明 |
 | targetId     | string | 是  | -         | 目标对象ID                    |
 | targetType   | string | 是  | -         | 目标对象类型                    |
-| targetName   | string | 否  | -         | 目标对象名称                    |
 | input        | object | 否  | -         | 输入数据                      |
 | runnerType   | string | 否  | -         | 执行者类型：`manual` / `system` |
 | delay        | number | 否  | `0`       | 延迟执行秒数                    |
@@ -533,7 +532,6 @@ const signature = generateSignature({
 | currentPage                  | number | 否  | `1`  | 当前页码                                                |
 | filter.id                    | string | 否  | -    | 任务ID                                                |
 | filter.targetId              | string | 否  | -    | 目标对象ID                                              |
-| filter.targetName            | string | 否  | -    | 目标名称（模糊匹配 `input.name`）                             |
 | filter.type                  | string | 否  | -    | 任务类型                                                |
 | filter.status                | string | 否  | -    | 任务状态                                                |
 | filter.runnerType            | string | 否  | -    | 执行者类型                                               |
@@ -710,7 +708,7 @@ SSE 实时推送任务统计数据，需 `statistics` 权限。
 
 | 方法签名                                                                                                                                                                       | 说明                                   |
 |----------------------------------------------------------------------------------------------------------------------------------------------------------------------------|--------------------------------------|
-| `services.create({ userId, input, type, targetId, targetType, targetName, runnerType, delay, scriptName, priority, parentTaskId, maxRetries, timeout, context, options })` | 创建任务，返回 Task 实例                      |
+| `services.create({ userId, input, type, targetId, targetType, runnerType, delay, scriptName, priority, parentTaskId, maxRetries, timeout, context, options })` | 创建任务，返回 Task 实例                      |
 | `services.detail({ id })`                                                                                                                                                  | 获取任务详情，返回 Task 实例                    |
 | `services.list({ filter, perPage, currentPage, sort })`                                                                                                                    | 获取任务列表，返回 `{ pageData, totalCount }` |
 | `services.complete({ id, userId, status, output, error })`                                                                                                                 | 手动完成任务                               |
@@ -727,7 +725,6 @@ SSE 实时推送任务统计数据，需 `statistics` 权限。
 | type         | string | 是  | -         | 任务类型     |
 | targetId     | string | 是  | -         | 目标对象ID   |
 | targetType   | string | 是  | -         | 目标对象类型   |
-| targetName   | string | 否  | -         | 目标对象名称   |
 | runnerType   | string | 否  | -         | 执行者类型    |
 | delay        | number | 否  | `0`       | 延迟执行秒数   |
 | scriptName   | string | 否  | -         | 脚本名称     |
@@ -825,7 +822,6 @@ SSE 实时推送任务统计数据，需 `statistics` 权限。
 | scriptName      | string          | 任务脚本名称                                                                                  |
 | targetId        | string          | 任务目标对象ID                                                                                |
 | targetType      | string          | 任务目标对象类型                                                                                |
-| targetName      | string          | 任务目标对象名称                                                                                |
 | runnerType      | string          | 执行者类型：`manual` / `system`，默认 `manual`                                                   |
 | priority        | number          | 任务优先级，数值越大越优先，默认 0                                                                      |
 | parentTaskId    | string          | 父任务ID，用于任务依赖                                                                            |

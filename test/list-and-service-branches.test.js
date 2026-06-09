@@ -90,31 +90,6 @@ describe('@kne/fastify-task - list filters and service branches', function () {
   });
 
   describe('list 过滤与排序测试', () => {
-    it('should filter by targetName', async () => {
-      fastify = await createFastify();
-      await fastify.ready();
-
-      await fastify.task.services.create({
-        type: 'test-type',
-        targetId: 'target-1',
-        targetType: 'document',
-        input: { name: 'My Document' }
-      });
-      await fastify.task.services.create({
-        type: 'test-type',
-        targetId: 'target-2',
-        targetType: 'image',
-        input: { name: 'My Image' }
-      });
-
-      const result = await fastify.task.services.list({
-        perPage: 10,
-        currentPage: 1,
-        filter: { targetName: 'Document' }
-      });
-      expect(result.totalCount).to.equal(1);
-    });
-
     it('should filter by createdAt range', async () => {
       fastify = await createFastify();
       await fastify.ready();

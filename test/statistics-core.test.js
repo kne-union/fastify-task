@@ -217,6 +217,22 @@ describe('@kne/fastify-task - statistics core queries', function () {
       expect(callArgs.endTime).to.exist;
     });
 
+    it('should use a rolling one-month window for 1m range', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+
+      const clock = sinon.useFakeTimers(new Date('2026-06-09T09:27:30.000Z'));
+      try {
+        await fastify.task.services.queryStatistics({ range: '1m' });
+
+        const callArgs = fastify.taskStatistics.services.query.firstCall.args[0];
+        expect(callArgs.startTime.toISOString()).to.equal('2026-05-09T09:27:30.000Z');
+        expect(callArgs.endTime.toISOString()).to.equal('2026-06-09T09:27:30.000Z');
+      } finally {
+        clock.restore();
+      }
+    });
+
     it('should handle 3m range', async () => {
       fastify = await createFastify();
       await fastify.ready();
