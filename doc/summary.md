@@ -15,10 +15,10 @@ pending（待执行）
       claimPendingTasks（按优先级与 startTime 原子认领）
         ↓
       running（执行中）
-        ├→ executor 正常完成 → success
+        ├→ executor 正常完成 → handler → next task → success
         ├→ executor 调用 next() → waiting
         ├→ executor 异常 → retry / failed
-        └→ waiting → processNext / callbackWithSignature → success / failed
+        └→ waiting → processNext / callbackWithSignature → handler → next task → success / failed
 ```
 
 | 节点                      | 说明                                                  |
@@ -27,6 +27,7 @@ pending（待执行）
 | `claimPendingTasks`     | 使用带状态条件的更新将 `pending` 原子认领为 `running`，避免多实例重复执行     |
 | `processSystemTask`     | 执行任务脚本，并根据结果、异常、重试次数和回调状态更新任务                       |
 | `collectTaskStatistics` | 任务进入终态后采集数量和耗时指标                                    |
+| `taskRegistry`          | 维护主项目与插件通过 `append` 注册的任务声明、脚本目录和生命周期钩子             |
 
 > **关键设计**：cron 每次触发 `runner` 时先检测超时任务，再按 **优先级降序 + startTime 升序** 认领待执行系统任务。认领通过条件更新完成，只有仍处于
 `pending` 的任务会被当前实例执行。
@@ -74,6 +75,8 @@ pending（待执行）
 | 自动重试    | 指数退避重试策略                                  |
 | 超时控制    | 全局执行超时和任务级超时均使用毫秒，超时自动标记 failed           |
 | 多实例调度   | 待执行任务通过原子认领进入 running，降低重复执行风险            |
+| 插件任务注册  | 插件可通过 `append` 注册自己的任务目录、脚本名、处理函数和错误处理     |
+| 链式任务    | 支持通过 `next` 声明后续任务，按当前输出创建下一任务              |
 | 统计面板    | 任务统计数据查询 + SSE 实时推送                       |
 
 ### 使用方法
@@ -95,12 +98,29 @@ fastify.register(require('@kne/fastify-task'), {
     'export-excel': async ({ task, result, context }) => {
       console.log('导出任务完成:', result);
     },
-    'send-email': async ({ task, result }) => {
-      // 发送邮件完成后的处理
+    'send-email': {
+      handler: async ({ task, result }) => {
+        // 发送邮件完成后的处理
+      },
+      errorHandler: async ({ task, error }) => {
+        // 可选：当前任务类型自己的错误处理
+      }
     }
   }
 });
 ```
+
+#### 任务声明与命名空间
+
+任务类型可以由主项目注册时的 `task` 配置声明，也可以由其他插件通过 `append` 动态声明。声明对象支持 `handler`、`errorHandler` 和
+`next`，其中 `handler` 可省略；只要任务类型已经声明并存在对应执行脚本，就可以创建和执行任务。
+
+| 声明来源       | 默认命名空间       | 任务名解析规则                                      |
+|------------|--------------|-----------------------------------------------|
+| 主项目 `task` | `options.name` | 可直接使用本地任务名，也可使用 `{options.name}.任务名`          |
+| 插件 `append` | `append.name` | 本地任务名只在当前插件内查找，跨插件使用 `{append.name}.任务名` |
+
+> **关键设计**：插件任务不能访问主项目中的任务。插件内的裸任务名只解析到当前插件命名空间，跨插件访问必须使用 `包名.任务名`。
 
 #### 任务脚本开发
 
@@ -172,7 +192,7 @@ module.exports = async (fastify, options, { task, updateProgress, polling, next,
 
 #### 任务类型处理函数
 
-任务完成后自动调用对应 `task[type]` 处理函数，接收参数：
+任务成功后如果配置了 `handler`，会自动调用对应处理函数；未配置时直接进入成功收尾。处理函数接收参数：
 
 | 参数名       | 类型              | 说明                   |
 |-----------|-----------------|----------------------|
@@ -180,20 +200,202 @@ module.exports = async (fastify, options, { task, updateProgress, polling, next,
 | `result`  | object / string | 任务输出结果               |
 | `context` | object          | 任务上下文（`next` 时设置的数据） |
 
+#### 错误处理函数
+
+任务最终失败时优先调用任务声明中的 `errorHandler`；未配置时调用全局 `errorHandler`。如果任务级 `errorHandler` 抛出异常，仍会继续交给全局
+`errorHandler` 处理。
+
+| 处理器                    | 触发条件          | 说明                         |
+|------------------------|---------------|----------------------------|
+| `tasks[type].errorHandler` | 当前任务最终失败      | 当前任务类型自己的错误处理，优先级最高       |
+| `options.errorHandler` | 未配置任务级处理或任务级处理抛错 | 全局兜底错误处理，不改变任务最终失败状态      |
+
 #### 运行时动态添加
 
 ```js
-// 通过 append 方法运行时添加任务目录和类型
+// 插件包通过 append 方法运行时添加任务目录和类型
 const result = await fastify.task.services.append({
-  dirs: ['/path/to/tasks'],
+  name: 'trtcConference',
+  dir: '/path/to/tasks',
+  scriptName: 'index',
   tasks: {
-    'new-type': async ({ task, result }) => { /* 处理逻辑 */
+    'record-video': {
+      handler: async ({ task, result }) => {
+        // 可选：任务成功后的处理逻辑
+      },
+      errorHandler: async ({ task, error }) => {
+        // 可选：任务失败后的处理逻辑
+      },
+      next: ['transcode-video', 'analyze-video']
     }
   }
 });
 // result.dirs  → 实际添加的目录列表
 // result.tasks → 实际添加的类型列表
 ```
+
+`append.scriptName` 只影响本次 append 注册的任务；未配置时固定使用 `index.js`，不会使用主项目注册 task 时的 `options.scriptName`。
+
+#### 链式任务 next
+
+`tasks[type].next` 用于声明当前任务成功后的后续任务，只配置任务名称：
+
+| next 类型 | 下一个任务选择方式                         |
+|---------|------------------------------------|
+| string  | 固定创建该任务名对应的下一任务                  |
+| array   | 从当前任务 `output.next` 读取下一任务名，并要求在数组中 |
+
+创建下一任务时，`input` 使用当前任务 `output`，`input.name` 沿用当前任务的 `input.name`，`targetType` 固定为 `task`，`targetId` 和
+`parentTaskId` 为当前任务 id，`context` 从当前任务深拷贝。
+
+**业务示例：会议录像处理**
+
+会议结束后先执行 `record-video` 获取录像文件。脚本根据录像结果决定下一步：如果需要转码则进入 `transcode-video`，如果录像已经可直接使用则进入
+`save-video`。
+
+```js
+await fastify.task.services.append({
+  name: 'trtcConference',
+  dir: path.resolve(__dirname, './libs/tasks'),
+  tasks: {
+    'record-video': {
+      handler: async ({ task, result }) => {
+        await fastify.trtcConference.services.saveRecordMeta(result);
+      },
+      next: ['transcode-video', 'save-video']
+    },
+    'transcode-video': {
+      next: 'save-video'
+    },
+    'save-video': {
+      handler: async ({ result }) => {
+        await fastify.trtcConference.services.saveRecordVideo(result);
+      }
+    }
+  }
+});
+```
+
+`record-video/index.js` 可以通过 `output.next` 指定下一步：
+
+```js
+module.exports = async (fastify, options, { task }) => {
+  const record = await fastify.trtc.services.checkRecord(task.input);
+  return {
+    name: task.input.name,
+    fileId: record.fileId,
+    fileUrl: record.fileUrl,
+    next: record.needTranscode ? 'transcode-video' : 'save-video'
+  };
+};
+```
+
+如果 `record.needTranscode` 为 `true`，系统会创建 `transcode-video` 任务；否则创建 `save-video` 任务。下一任务的 `input` 就是上面返回的
+`output`，并自动带上当前任务的 `context`。
+
+**业务示例：多级审批**
+
+合同审批需要依次经过部门主管、财务和法务。每一级审批任务只负责处理当前节点，并把审批轨迹写入 `context.approvals`。下一任务创建时会复制当前
+`context`，因此后续节点可以看到前面所有审批记录。
+
+```js
+await fastify.task.services.append({
+  name: 'contractApproval',
+  dir: path.resolve(__dirname, './libs/tasks'),
+  tasks: {
+    'manager-approval': {
+      next: 'finance-approval'
+    },
+    'finance-approval': {
+      next: ['legal-approval', 'archive-contract']
+    },
+    'legal-approval': {
+      next: 'archive-contract'
+    },
+    'archive-contract': {
+      handler: async ({ task, context }) => {
+        await fastify.contract.services.archive({
+          contractId: task.input.contractId,
+          approvals: context.approvals
+        });
+      }
+    }
+  }
+});
+```
+
+创建第一个审批任务时写入初始上下文：
+
+```js
+await fastify.task.services.create({
+  type: 'contractApproval.manager-approval',
+  targetType: 'contract',
+  targetId: contract.id,
+  runnerType: 'system',
+  input: {
+    name: contract.name,
+    contractId: contract.id
+  },
+  context: {
+    requestId: contract.requestId,
+    approvals: []
+  }
+});
+```
+
+`manager-approval/index.js` 更新当前任务的 `context`：
+
+```js
+module.exports = async (fastify, options, { task }) => {
+  const approvals = [...(task.context.approvals || []), {
+    node: 'manager',
+    approver: 'u-manager-1',
+    result: 'approved',
+    time: new Date().toISOString()
+  }];
+
+  await task.update({
+    context: {
+      ...task.context,
+      approvals
+    }
+  });
+
+  return {
+    name: task.input.name,
+    contractId: task.input.contractId
+  };
+};
+```
+
+`finance-approval/index.js` 可以根据金额动态决定是否进入法务审批：
+
+```js
+module.exports = async (fastify, options, { task }) => {
+  const approvals = [...(task.context.approvals || []), {
+    node: 'finance',
+    approver: 'u-finance-1',
+    result: 'approved',
+    time: new Date().toISOString()
+  }];
+
+  await task.update({
+    context: {
+      ...task.context,
+      approvals
+    }
+  });
+
+  return {
+    name: task.input.name,
+    contractId: task.input.contractId,
+    next: task.input.amount > 100000 ? 'legal-approval' : 'archive-contract'
+  };
+};
+```
+
+在这个流程中，`finance-approval` 会拿到主管审批后复制过来的 `context.approvals`；`legal-approval` 或 `archive-contract`
+也会继续拿到财务审批后更新过的 `context`。每次创建下一任务都会深拷贝当前任务完成时的 `context`，不会和上一任务共享同一个对象引用。
 
 #### 签名验证
 

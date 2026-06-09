@@ -38,6 +38,7 @@ describe('@kne/fastify-task - core services', function () {
         type: 'test-type',
         targetId: 'target-1',
         targetType: 'document',
+        targetName: '测试文档',
         runnerType: 'manual'
       });
 
@@ -45,6 +46,7 @@ describe('@kne/fastify-task - core services', function () {
       expect(task.type).to.equal('test-type');
       expect(task.status).to.equal('pending');
       expect(task.targetId).to.equal('target-1');
+      expect(task.targetName).to.equal('测试文档');
     });
 
     it('should throw error when task type is not defined', async () => {
