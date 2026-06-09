@@ -429,6 +429,23 @@ describe('@kne/fastify-task - list filters and service branches', function () {
         expect(e.message).to.include('maxRetries 必须为非负整数');
       }
     });
+
+    it('should throw error for unsafe scriptName', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+
+      try {
+        await fastify.task.services.create({
+          type: 'test-type',
+          targetId: 'target-1',
+          targetType: 'document',
+          scriptName: '../index'
+        });
+        throw new Error('Should have thrown');
+      } catch (e) {
+        expect(e.message).to.include('scriptName 只能包含');
+      }
+    });
   });
 
   describe('cancel running 任务测试', () => {
@@ -525,6 +542,34 @@ describe('@kne/fastify-task - list filters and service branches', function () {
       expect(result.totalCount).to.equal(2);
       expect(result.pageData[0].priority).to.equal(10);
       expect(result.pageData[1].priority).to.equal(5);
+    });
+
+    it('should reject unsupported sort field', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+
+      try {
+        await fastify.task.services.list({
+          sort: { 'input.name': 'ASC' }
+        });
+        throw new Error('Should have thrown');
+      } catch (e) {
+        expect(e.message).to.include('不支持的排序字段');
+      }
+    });
+
+    it('should reject unsupported sort direction', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+
+      try {
+        await fastify.task.services.list({
+          sort: { priority: 'SIDEWAYS' }
+        });
+        throw new Error('Should have thrown');
+      } catch (e) {
+        expect(e.message).to.include('不支持的排序方向');
+      }
     });
   });
 

@@ -13,7 +13,7 @@ module.exports = fp(
         dir: path.resolve(process.cwd(), 'libs', 'tasks'),
         /** 任务目录列表，运行时可通过 addDir 动态添加 */
         dirs: null,
-        cronTime: '*/10 * * * *',
+        cronTime: '*/1 * * * *',
         scriptName: 'index',
         maxPollTimes: 20,
         pollInterval: 10000,

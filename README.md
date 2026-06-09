@@ -29,10 +29,10 @@ pending（待执行）
       claimPendingTasks（按优先级与 startTime 原子认领）
         ↓
       running（执行中）
-        ├→ executor 正常完成 → success
+        ├→ executor 正常完成 → handler → next task → success
         ├→ executor 调用 next() → waiting
         ├→ executor 异常 → retry / failed
-        └→ waiting → processNext / callbackWithSignature → success / failed
+        └→ waiting → processNext / callbackWithSignature → handler → next task → success / failed
 ```
 
 | 节点                      | 说明                                                  |
@@ -41,6 +41,7 @@ pending（待执行）
 | `claimPendingTasks`     | 使用带状态条件的更新将 `pending` 原子认领为 `running`，避免多实例重复执行     |
 | `processSystemTask`     | 执行任务脚本，并根据结果、异常、重试次数和回调状态更新任务                       |
 | `collectTaskStatistics` | 任务进入终态后采集数量和耗时指标                                    |
+| `taskRegistry`          | 维护主项目与插件通过 `append` 注册的任务声明、脚本目录和生命周期钩子             |
 
 > **关键设计**：cron 每次触发 `runner` 时先检测超时任务，再按 **优先级降序 + startTime 升序** 认领待执行系统任务。认领通过条件更新完成，只有仍处于
 `pending` 的任务会被当前实例执行。
@@ -88,6 +89,8 @@ pending（待执行）
 | 自动重试    | 指数退避重试策略                                  |
 | 超时控制    | 全局执行超时和任务级超时均使用毫秒，超时自动标记 failed           |
 | 多实例调度   | 待执行任务通过原子认领进入 running，降低重复执行风险            |
+| 插件任务注册  | 插件可通过 `append` 注册自己的任务目录、脚本名、处理函数和错误处理     |
+| 链式任务    | 支持通过 `next` 声明后续任务，按当前输出创建下一任务              |
 | 统计面板    | 任务统计数据查询 + SSE 实时推送                       |
 
 ### 使用方法
@@ -109,12 +112,29 @@ fastify.register(require('@kne/fastify-task'), {
     'export-excel': async ({ task, result, context }) => {
       console.log('导出任务完成:', result);
     },
-    'send-email': async ({ task, result }) => {
-      // 发送邮件完成后的处理
+    'send-email': {
+      handler: async ({ task, result }) => {
+        // 发送邮件完成后的处理
+      },
+      errorHandler: async ({ task, error }) => {
+        // 可选：当前任务类型自己的错误处理
+      }
     }
   }
 });
 ```
+
+#### 任务声明与命名空间
+
+任务类型可以由主项目注册时的 `task` 配置声明，也可以由其他插件通过 `append` 动态声明。声明对象支持 `handler`、`errorHandler` 和
+`next`，其中 `handler` 可省略；只要任务类型已经声明并存在对应执行脚本，就可以创建和执行任务。
+
+| 声明来源       | 默认命名空间       | 任务名解析规则                                      |
+|------------|--------------|-----------------------------------------------|
+| 主项目 `task` | `options.name` | 可直接使用本地任务名，也可使用 `{options.name}.任务名`          |
+| 插件 `append` | `append.name` | 本地任务名只在当前插件内查找，跨插件使用 `{append.name}.任务名` |
+
+> **关键设计**：插件任务不能访问主项目中的任务。插件内的裸任务名只解析到当前插件命名空间，跨插件访问必须使用 `包名.任务名`。
 
 #### 任务脚本开发
 
@@ -186,7 +206,7 @@ module.exports = async (fastify, options, { task, updateProgress, polling, next,
 
 #### 任务类型处理函数
 
-任务完成后自动调用对应 `task[type]` 处理函数，接收参数：
+任务成功后如果配置了 `handler`，会自动调用对应处理函数；未配置时直接进入成功收尾。处理函数接收参数：
 
 | 参数名       | 类型              | 说明                   |
 |-----------|-----------------|----------------------|
@@ -194,20 +214,202 @@ module.exports = async (fastify, options, { task, updateProgress, polling, next,
 | `result`  | object / string | 任务输出结果               |
 | `context` | object          | 任务上下文（`next` 时设置的数据） |
 
+#### 错误处理函数
+
+任务最终失败时优先调用任务声明中的 `errorHandler`；未配置时调用全局 `errorHandler`。如果任务级 `errorHandler` 抛出异常，仍会继续交给全局
+`errorHandler` 处理。
+
+| 处理器                    | 触发条件          | 说明                         |
+|------------------------|---------------|----------------------------|
+| `tasks[type].errorHandler` | 当前任务最终失败      | 当前任务类型自己的错误处理，优先级最高       |
+| `options.errorHandler` | 未配置任务级处理或任务级处理抛错 | 全局兜底错误处理，不改变任务最终失败状态      |
+
 #### 运行时动态添加
 
 ```js
-// 通过 append 方法运行时添加任务目录和类型
+// 插件包通过 append 方法运行时添加任务目录和类型
 const result = await fastify.task.services.append({
-  dirs: ['/path/to/tasks'],
+  name: 'trtcConference',
+  dir: '/path/to/tasks',
+  scriptName: 'index',
   tasks: {
-    'new-type': async ({ task, result }) => { /* 处理逻辑 */
+    'record-video': {
+      handler: async ({ task, result }) => {
+        // 可选：任务成功后的处理逻辑
+      },
+      errorHandler: async ({ task, error }) => {
+        // 可选：任务失败后的处理逻辑
+      },
+      next: ['transcode-video', 'analyze-video']
     }
   }
 });
 // result.dirs  → 实际添加的目录列表
 // result.tasks → 实际添加的类型列表
 ```
+
+`append.scriptName` 只影响本次 append 注册的任务；未配置时固定使用 `index.js`，不会使用主项目注册 task 时的 `options.scriptName`。
+
+#### 链式任务 next
+
+`tasks[type].next` 用于声明当前任务成功后的后续任务，只配置任务名称：
+
+| next 类型 | 下一个任务选择方式                         |
+|---------|------------------------------------|
+| string  | 固定创建该任务名对应的下一任务                  |
+| array   | 从当前任务 `output.next` 读取下一任务名，并要求在数组中 |
+
+创建下一任务时，`input` 使用当前任务 `output`，`input.name` 沿用当前任务的 `input.name`，`targetType` 固定为 `task`，`targetId` 和
+`parentTaskId` 为当前任务 id，`context` 从当前任务深拷贝。
+
+**业务示例：会议录像处理**
+
+会议结束后先执行 `record-video` 获取录像文件。脚本根据录像结果决定下一步：如果需要转码则进入 `transcode-video`，如果录像已经可直接使用则进入
+`save-video`。
+
+```js
+await fastify.task.services.append({
+  name: 'trtcConference',
+  dir: path.resolve(__dirname, './libs/tasks'),
+  tasks: {
+    'record-video': {
+      handler: async ({ task, result }) => {
+        await fastify.trtcConference.services.saveRecordMeta(result);
+      },
+      next: ['transcode-video', 'save-video']
+    },
+    'transcode-video': {
+      next: 'save-video'
+    },
+    'save-video': {
+      handler: async ({ result }) => {
+        await fastify.trtcConference.services.saveRecordVideo(result);
+      }
+    }
+  }
+});
+```
+
+`record-video/index.js` 可以通过 `output.next` 指定下一步：
+
+```js
+module.exports = async (fastify, options, { task }) => {
+  const record = await fastify.trtc.services.checkRecord(task.input);
+  return {
+    name: task.input.name,
+    fileId: record.fileId,
+    fileUrl: record.fileUrl,
+    next: record.needTranscode ? 'transcode-video' : 'save-video'
+  };
+};
+```
+
+如果 `record.needTranscode` 为 `true`，系统会创建 `transcode-video` 任务；否则创建 `save-video` 任务。下一任务的 `input` 就是上面返回的
+`output`，并自动带上当前任务的 `context`。
+
+**业务示例：多级审批**
+
+合同审批需要依次经过部门主管、财务和法务。每一级审批任务只负责处理当前节点，并把审批轨迹写入 `context.approvals`。下一任务创建时会复制当前
+`context`，因此后续节点可以看到前面所有审批记录。
+
+```js
+await fastify.task.services.append({
+  name: 'contractApproval',
+  dir: path.resolve(__dirname, './libs/tasks'),
+  tasks: {
+    'manager-approval': {
+      next: 'finance-approval'
+    },
+    'finance-approval': {
+      next: ['legal-approval', 'archive-contract']
+    },
+    'legal-approval': {
+      next: 'archive-contract'
+    },
+    'archive-contract': {
+      handler: async ({ task, context }) => {
+        await fastify.contract.services.archive({
+          contractId: task.input.contractId,
+          approvals: context.approvals
+        });
+      }
+    }
+  }
+});
+```
+
+创建第一个审批任务时写入初始上下文：
+
+```js
+await fastify.task.services.create({
+  type: 'contractApproval.manager-approval',
+  targetType: 'contract',
+  targetId: contract.id,
+  runnerType: 'system',
+  input: {
+    name: contract.name,
+    contractId: contract.id
+  },
+  context: {
+    requestId: contract.requestId,
+    approvals: []
+  }
+});
+```
+
+`manager-approval/index.js` 更新当前任务的 `context`：
+
+```js
+module.exports = async (fastify, options, { task }) => {
+  const approvals = [...(task.context.approvals || []), {
+    node: 'manager',
+    approver: 'u-manager-1',
+    result: 'approved',
+    time: new Date().toISOString()
+  }];
+
+  await task.update({
+    context: {
+      ...task.context,
+      approvals
+    }
+  });
+
+  return {
+    name: task.input.name,
+    contractId: task.input.contractId
+  };
+};
+```
+
+`finance-approval/index.js` 可以根据金额动态决定是否进入法务审批：
+
+```js
+module.exports = async (fastify, options, { task }) => {
+  const approvals = [...(task.context.approvals || []), {
+    node: 'finance',
+    approver: 'u-finance-1',
+    result: 'approved',
+    time: new Date().toISOString()
+  }];
+
+  await task.update({
+    context: {
+      ...task.context,
+      approvals
+    }
+  });
+
+  return {
+    name: task.input.name,
+    contractId: task.input.contractId,
+    next: task.input.amount > 100000 ? 'legal-approval' : 'archive-contract'
+  };
+};
+```
+
+在这个流程中，`finance-approval` 会拿到主管审批后复制过来的 `context.approvals`；`legal-approval` 或 `archive-contract`
+也会继续拿到财务审批后更新过的 `context`。每次创建下一任务都会深拷贝当前任务完成时的 `context`，不会和上一任务共享同一个对象引用。
 
 #### 签名验证
 
@@ -281,9 +483,10 @@ const signature = generateSignature({
 | `recoverRunningTaskAfter`    | number / null | 否  | `null`           | 启动恢复 running 任务的陈旧阈值（毫秒）；未传时使用 `taskTimeout`，若 `taskTimeout` 为 0 则使用 `1800000` |
 | `recoverRunningTasksOnStart` | boolean       | 否  | `true`           | 启动时是否恢复陈旧 running 任务                                                           |
 | `retryBaseDelay`             | number        | 否  | `5000`           | 重试基础延迟（毫秒），实际延迟 = `retryBaseDelay * 2^(retryCount-1)`                          |
+| `errorHandler`               | function      | 否  | -                | 全局错误处理函数，任务级 `errorHandler` 未配置或抛错时调用                                           |
 | `getUserModel`               | function      | 否  | -                | 获取用户 Model 的函数                                                                 |
 | `getAuthenticate`            | function      | 否  | -                | 获取认证中间件的函数                                                                     |
-| `task`                       | object        | 否  | `{}`             | 任务类型处理函数配置，`{ [type]: handler }`                                               |
+| `task`                       | object        | 否  | `{}`             | 主项目任务声明，支持 `{ [type]: handler }` 或 `{ [type]: { handler, errorHandler, next } }` |
 
 > **关键设计**：`dirs` 初始化逻辑 — 优先使用用户传入的 `dirs`，否则以 `dir` 为默认值；若 `dirs` 中不包含 `dir`，则将 `dir`
 > 插入 `dirs` 首位，保证向后兼容。
@@ -298,9 +501,10 @@ const signature = generateSignature({
 
 | 参数名          | 类型     | 必填 | 默认值       | 说明                        |
 |--------------|--------|----|-----------|---------------------------|
-| type         | string | 是  | -         | 任务类型，必须在 `task` 配置中声明     |
+| type         | string | 是  | -         | 任务类型，必须已在主项目或 `append` 中声明 |
 | targetId     | string | 是  | -         | 目标对象ID                    |
 | targetType   | string | 是  | -         | 目标对象类型                    |
+| targetName   | string | 否  | -         | 目标对象名称                    |
 | input        | object | 否  | -         | 输入数据                      |
 | runnerType   | string | 否  | -         | 执行者类型：`manual` / `system` |
 | delay        | number | 否  | `0`       | 延迟执行秒数                    |
@@ -309,6 +513,7 @@ const signature = generateSignature({
 | parentTaskId | string | 否  | -         | 父任务ID，用于任务依赖              |
 | maxRetries   | number | 否  | `0`       | 最大自动重试次数                  |
 | timeout      | number | 否  | `3600000` | 任务超时时间（毫秒），0 表示不超时        |
+| context      | object | 否  | `{}`      | 初始上下文，用于回调签名、日志或链式任务传递     |
 
 返回值：
 
@@ -503,15 +708,15 @@ SSE 实时推送任务统计数据，需 `statistics` 权限。
 
 #### 任务管理
 
-| 方法签名                                                                                                                                                  | 说明                                   |
-|-------------------------------------------------------------------------------------------------------------------------------------------------------|--------------------------------------|
-| `services.create({ userId, input, type, targetId, targetType, runnerType, delay, scriptName, priority, parentTaskId, maxRetries, timeout, options })` | 创建任务，返回 Task 实例                      |
-| `services.detail({ id })`                                                                                                                             | 获取任务详情，返回 Task 实例                    |
-| `services.list({ filter, perPage, currentPage, sort })`                                                                                               | 获取任务列表，返回 `{ pageData, totalCount }` |
-| `services.complete({ id, userId, status, output, error })`                                                                                            | 手动完成任务                               |
-| `services.cancel({ id, targetId, targetType, type })`                                                                                                 | 取消任务，支持单个或批量                         |
-| `services.retry({ id, taskIds })`                                                                                                                     | 重试任务，仅允许 `failed`/`canceled` 状态      |
-| `services.waitingComplete({ id, pollInterval, maxPollTimes })`                                                                                        | 等待任务完成（轮询），返回任务输出数据                  |
+| 方法签名                                                                                                                                                                       | 说明                                   |
+|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------|--------------------------------------|
+| `services.create({ userId, input, type, targetId, targetType, targetName, runnerType, delay, scriptName, priority, parentTaskId, maxRetries, timeout, context, options })` | 创建任务，返回 Task 实例                      |
+| `services.detail({ id })`                                                                                                                                                  | 获取任务详情，返回 Task 实例                    |
+| `services.list({ filter, perPage, currentPage, sort })`                                                                                                                    | 获取任务列表，返回 `{ pageData, totalCount }` |
+| `services.complete({ id, userId, status, output, error })`                                                                                                                 | 手动完成任务                               |
+| `services.cancel({ id, targetId, targetType, type })`                                                                                                                      | 取消任务，支持单个或批量                         |
+| `services.retry({ id, taskIds })`                                                                                                                                          | 重试任务，仅允许 `failed`/`canceled` 状态      |
+| `services.waitingComplete({ id, pollInterval, maxPollTimes })`                                                                                                             | 等待任务完成（轮询），返回任务输出数据                  |
 
 **services.create 参数：**
 
@@ -522,6 +727,7 @@ SSE 实时推送任务统计数据，需 `statistics` 权限。
 | type         | string | 是  | -         | 任务类型     |
 | targetId     | string | 是  | -         | 目标对象ID   |
 | targetType   | string | 是  | -         | 目标对象类型   |
+| targetName   | string | 否  | -         | 目标对象名称   |
 | runnerType   | string | 否  | -         | 执行者类型    |
 | delay        | number | 否  | `0`       | 延迟执行秒数   |
 | scriptName   | string | 否  | -         | 脚本名称     |
@@ -529,6 +735,7 @@ SSE 实时推送任务统计数据，需 `statistics` 权限。
 | parentTaskId | string | 否  | -         | 父任务ID    |
 | maxRetries   | number | 否  | `0`       | 最大重试次数   |
 | timeout      | number | 否  | `3600000` | 超时时间（毫秒） |
+| context      | object | 否  | `{}`      | 初始上下文    |
 | options      | object | 否  | -         | 扩展选项     |
 
 **services.waitingComplete 参数：**
@@ -557,7 +764,29 @@ SSE 实时推送任务统计数据，需 `statistics` 权限。
 | `services.claimPendingTasks(limit)`        | 按优先级和开始时间认领待执行系统任务，返回已认领任务列表                         |
 | `services.processSystemTask(task, opts)`   | 执行系统任务；`opts.claimed` 为 `true` 时跳过重复置为 running       |
 | `services.resetAll({ staleOnly, before })` | 重置 running 任务为 pending；`staleOnly` 为 `true` 时只恢复陈旧任务 |
-| `services.append({ dirs, tasks })`         | 运行时动态添加任务目录和类型，返回 `{ dirs, tasks }`                  |
+| `services.append({ name, dir, dirs, scriptName, tasks, override })` | 运行时动态添加任务声明，返回 `{ dirs, tasks, skippedTasks }`         |
+
+**services.append 参数：**
+
+| 参数名        | 类型      | 必填 | 默认值            | 说明                                      |
+|-------------|---------|----|----------------|-----------------------------------------|
+| name        | string  | 否  | `options.name` | 本次 append 注册的任务命名空间，插件包通常传自身 `options.name` |
+| dir         | string  | 否  | -              | 任务脚本目录，等价于单项 `dirs`                    |
+| dirs        | array   | 否  | -              | 任务脚本目录列表                                |
+| scriptName  | string  | 否  | `'index'`      | 本次 append 注册任务的默认脚本名                    |
+| tasks       | object  | 否  | -              | 任务声明映射，支持函数简写或对象配置                    |
+| override    | boolean | 否  | `false`        | 是否覆盖已存在的同名任务声明                         |
+
+**tasks[type] 对象配置：**
+
+| 属性名          | 类型             | 必填 | 默认值 | 说明                                      |
+|---------------|----------------|----|-----|-----------------------------------------|
+| handler       | function       | 否  | -   | 任务成功后的处理函数                              |
+| errorHandler  | function       | 否  | -   | 当前任务类型自己的错误处理函数                         |
+| next          | string / array | 否  | -   | 成功后创建的下一任务；数组模式从 `output.next` 中选择下一任务 |
+
+> **关键设计**：`append.scriptName` 只影响本次 append 注册的任务。未传时固定使用 `index.js`，不会使用主项目注册 task 时的
+> `options.scriptName`。
 
 #### 统计查询
 
@@ -596,6 +825,7 @@ SSE 实时推送任务统计数据，需 `statistics` 权限。
 | scriptName      | string          | 任务脚本名称                                                                                  |
 | targetId        | string          | 任务目标对象ID                                                                                |
 | targetType      | string          | 任务目标对象类型                                                                                |
+| targetName      | string          | 任务目标对象名称                                                                                |
 | runnerType      | string          | 执行者类型：`manual` / `system`，默认 `manual`                                                   |
 | priority        | number          | 任务优先级，数值越大越优先，默认 0                                                                      |
 | parentTaskId    | string          | 父任务ID，用于任务依赖                                                                            |
@@ -640,6 +870,213 @@ SSE 实时推送任务统计数据，需 `statistics` 权限。
 | `priority`                     |
 
 ### 机制说明
+
+#### 任务声明与命名空间
+
+任务类型由 task registry 统一维护。主项目注册 task 插件时可以通过 `task` 直接声明任务，插件包可以通过 `services.append` 声明自己的任务。
+
+| 来源             | 命名空间          | 可访问任务范围                                      |
+|----------------|---------------|-----------------------------------------------|
+| 主项目 `task`     | `options.name` | 主项目任务、插件任务；插件任务需使用 `{append.name}.任务名`       |
+| 插件 `append`    | `append.name`  | 当前插件任务、其他插件任务；不能访问主项目任务                   |
+| `create({type})` | 根据任务名解析       | 无点号时优先主项目任务；跨插件或指定命名空间时使用 `命名空间.任务名` |
+
+`append` 注册的任务可以没有 `handler`，只要存在对应执行脚本即可执行。主项目原有的 `{ [type]: handler }` 写法仍然兼容。
+
+> **关键设计**：插件内的裸任务名只在当前插件命名空间内解析；跨插件访问必须使用 `包名.任务名`。插件任务不允许访问主项目任务。
+
+#### 成功与错误处理
+
+任务执行成功后会先调用当前任务声明的 `handler`，再创建 `next` 任务，最后将当前任务更新为 `success` 并采集统计数据。
+
+| 阶段      | 行为                                      |
+|---------|-----------------------------------------|
+| handler | 如果声明了 `handler`，等待它执行完成；未声明则跳过          |
+| next    | 如果声明了 `next`，解析并创建下一任务                   |
+| success | 更新 `status/output/progress/completedAt` 并采集统计 |
+
+任务最终失败时会触发错误处理：
+
+| 处理器                    | 触发时机                         |
+|------------------------|------------------------------|
+| `tasks[type].errorHandler` | 当前任务最终失败时优先调用                 |
+| `options.errorHandler` | 未配置任务级错误处理，或任务级错误处理抛错时调用 |
+
+> **关键设计**：自动重试期间不会触发最终错误处理；只有任务最终进入 `failed` 状态时才调用错误处理函数。
+
+#### next 链式任务
+
+`tasks[type].next` 只声明下一任务名称，不声明下一任务的执行参数。
+
+| next 配置 | 解析规则                                    |
+|---------|-----------------------------------------|
+| string  | 固定使用该任务名作为下一任务                         |
+| array   | 从当前任务 `output.next` 读取任务名，并要求它包含在数组中 |
+
+下一任务创建规则：
+
+| 字段           | 取值                                                |
+|--------------|---------------------------------------------------|
+| `type`       | 解析后的下一任务声明类型                                      |
+| `input`      | 当前任务 `output`，并将 `input.name` 设为当前任务 `input.name` |
+| `targetType` | 固定为 `task`                                       |
+| `targetId`   | 当前任务 id                                           |
+| `parentTaskId` | 当前任务 id                                         |
+| `context`    | 当前任务 `context` 的深拷贝                              |
+| `runnerType` | 当前任务 `runnerType`                                |
+
+如果 `next` 是数组且 `output.next` 缺失，或 `output.next` 不在允许列表中，当前任务会转为 `failed`。
+
+**业务示例：会议录像处理**
+
+会议结束后先执行 `record-video` 获取录像文件。脚本根据录像结果决定下一步：需要转码时进入 `transcode-video`，否则直接进入 `save-video`。
+
+```js
+await fastify.task.services.append({
+  name: 'trtcConference',
+  dir: path.resolve(__dirname, './libs/tasks'),
+  tasks: {
+    'record-video': {
+      handler: async ({ task, result }) => {
+        await fastify.trtcConference.services.saveRecordMeta(result);
+      },
+      next: ['transcode-video', 'save-video']
+    },
+    'transcode-video': {
+      next: 'save-video'
+    },
+    'save-video': {
+      handler: async ({ result }) => {
+        await fastify.trtcConference.services.saveRecordVideo(result);
+      }
+    }
+  }
+});
+```
+
+`record-video/index.js` 返回 `output.next` 指定下一任务：
+
+```js
+module.exports = async (fastify, options, { task }) => {
+  const record = await fastify.trtc.services.checkRecord(task.input);
+  return {
+    name: task.input.name,
+    fileId: record.fileId,
+    fileUrl: record.fileUrl,
+    next: record.needTranscode ? 'transcode-video' : 'save-video'
+  };
+};
+```
+
+当 `output.next` 为 `transcode-video` 时，会创建 `trtcConference.transcode-video`；当它为 `save-video` 时，会创建
+`trtcConference.save-video`。下一任务的 `input` 使用当前任务完整 `output`，并复制当前任务 `context`。
+
+**业务示例：多级审批**
+
+合同审批需要依次经过部门主管、财务和法务。每一级审批任务只处理当前节点，并把审批轨迹写入 `context.approvals`。下一任务创建时会复制当前
+`context`，因此后续节点可以看到前面所有审批记录。
+
+```js
+await fastify.task.services.append({
+  name: 'contractApproval',
+  dir: path.resolve(__dirname, './libs/tasks'),
+  tasks: {
+    'manager-approval': {
+      next: 'finance-approval'
+    },
+    'finance-approval': {
+      next: ['legal-approval', 'archive-contract']
+    },
+    'legal-approval': {
+      next: 'archive-contract'
+    },
+    'archive-contract': {
+      handler: async ({ task, context }) => {
+        await fastify.contract.services.archive({
+          contractId: task.input.contractId,
+          approvals: context.approvals
+        });
+      }
+    }
+  }
+});
+```
+
+创建第一个审批任务时写入初始上下文：
+
+```js
+await fastify.task.services.create({
+  type: 'contractApproval.manager-approval',
+  targetType: 'contract',
+  targetId: contract.id,
+  runnerType: 'system',
+  input: {
+    name: contract.name,
+    contractId: contract.id,
+    amount: contract.amount
+  },
+  context: {
+    requestId: contract.requestId,
+    approvals: []
+  }
+});
+```
+
+`manager-approval/index.js` 更新当前任务的 `context`：
+
+```js
+module.exports = async (fastify, options, { task }) => {
+  const approvals = [...(task.context.approvals || []), {
+    node: 'manager',
+    approver: 'u-manager-1',
+    result: 'approved',
+    time: new Date().toISOString()
+  }];
+
+  await task.update({
+    context: {
+      ...task.context,
+      approvals
+    }
+  });
+
+  return {
+    name: task.input.name,
+    contractId: task.input.contractId,
+    amount: task.input.amount
+  };
+};
+```
+
+`finance-approval/index.js` 可以根据金额动态决定是否进入法务审批：
+
+```js
+module.exports = async (fastify, options, { task }) => {
+  const approvals = [...(task.context.approvals || []), {
+    node: 'finance',
+    approver: 'u-finance-1',
+    result: 'approved',
+    time: new Date().toISOString()
+  }];
+
+  await task.update({
+    context: {
+      ...task.context,
+      approvals
+    }
+  });
+
+  return {
+    name: task.input.name,
+    contractId: task.input.contractId,
+    amount: task.input.amount,
+    next: task.input.amount > 100000 ? 'legal-approval' : 'archive-contract'
+  };
+};
+```
+
+在这个流程中，`finance-approval` 会拿到主管审批后复制过来的 `context.approvals`；`legal-approval` 或 `archive-contract`
+也会继续拿到财务审批后更新过的 `context`。每次创建下一任务都会深拷贝当前任务完成时的 `context`，不会和上一任务共享同一个对象引用。
 
 #### 签名验证
 

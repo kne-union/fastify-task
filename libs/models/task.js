@@ -18,6 +18,10 @@ module.exports = ({ DataTypes, definePrimaryType, options }) => {
         comment: '任务目标对象类型',
         allowNull: false
       },
+      targetName: {
+        type: DataTypes.STRING,
+        comment: '任务目标对象名称'
+      },
       runnerType: {
         type: DataTypes.ENUM('manual', 'system'),
         comment: '任务执行者类型: manual为手动执行, system为系统自动执行',
@@ -51,7 +55,7 @@ module.exports = ({ DataTypes, definePrimaryType, options }) => {
       startTime: {
         type: DataTypes.DATE,
         comment: '任务最早执行时间',
-        defaultValue: new Date()
+        defaultValue: DataTypes.NOW
       },
       startedAt: {
         type: DataTypes.DATE,

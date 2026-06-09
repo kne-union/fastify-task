@@ -83,6 +83,36 @@ describe('@kne/fastify-task - execution and scheduler', function () {
       expect(updated.retryCount).to.equal(1);
     });
 
+    it('should honor maxRetries as retry count', async () => {
+      fastify = await createFastify({ retryBaseDelay: 1 });
+      await fastify.ready();
+
+      const task = await fastify.task.services.create({
+        type: 'fail-type',
+        targetId: 'target-1',
+        targetType: 'document',
+        runnerType: 'system',
+        maxRetries: 2
+      });
+
+      await fastify.task.services.processSystemTask(task);
+      let updated = await fastify.task.services.detail({ id: task.id });
+      expect(updated.status).to.equal('pending');
+      expect(updated.retryCount).to.equal(1);
+
+      await updated.update({ startTime: new Date(Date.now() - 1000) });
+      await fastify.task.services.processSystemTask(updated);
+      updated = await fastify.task.services.detail({ id: task.id });
+      expect(updated.status).to.equal('pending');
+      expect(updated.retryCount).to.equal(2);
+
+      await updated.update({ startTime: new Date(Date.now() - 1000) });
+      await fastify.task.services.processSystemTask(updated);
+      updated = await fastify.task.services.detail({ id: task.id });
+      expect(updated.status).to.equal('failed');
+      expect(updated.retryCount).to.equal(3);
+    });
+
     it('should fail task when max retries exceeded', async () => {
       fastify = await createFastify();
       await fastify.ready();
@@ -289,6 +319,76 @@ describe('@kne/fastify-task - execution and scheduler', function () {
       const childUpdated = await fastify.task.services.detail({ id: child.id });
       // manual 类型子任务保持 pending
       expect(childUpdated.status).to.equal('pending');
+    });
+
+    it('should not claim child tasks before parent succeeds', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+
+      const parent = await fastify.task.services.create({
+        type: 'next-type',
+        targetId: 'target-1',
+        targetType: 'document',
+        runnerType: 'system'
+      });
+
+      const child = await fastify.task.services.create({
+        type: 'test-type',
+        targetId: 'target-2',
+        targetType: 'document',
+        runnerType: 'system',
+        parentTaskId: parent.id
+      });
+
+      await fastify.task.services.runner();
+
+      const parentUpdated = await fastify.task.services.detail({ id: parent.id });
+      const childUpdated = await fastify.task.services.detail({ id: child.id });
+      expect(parentUpdated.status).to.equal('waiting');
+      expect(childUpdated.status).to.equal('pending');
+    });
+  });
+
+  describe('状态竞态保护测试', () => {
+    it('should keep canceled running task canceled when executor resolves later', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+
+      const fs = require('fs-extra');
+      const tempDir = path.resolve(__dirname, './tasks/delayed-success-type');
+      await fs.ensureDir(tempDir);
+      await fs.writeFile(
+        path.resolve(tempDir, 'index.js'),
+        `module.exports = async () => {
+  await new Promise(resolve => setTimeout(resolve, 30));
+  return { result: 'delayed-success' };
+};
+`
+      );
+
+      await fastify.task.services.append({
+        tasks: {
+          'delayed-success-type': async ({ result }) => result
+        }
+      });
+
+      const task = await fastify.task.services.create({
+        type: 'delayed-success-type',
+        targetId: 'target-1',
+        targetType: 'document',
+        runnerType: 'system'
+      });
+
+      const processing = fastify.task.services.processSystemTask(task);
+      setTimeout(() => {
+        fastify.task.services.cancel({ id: task.id }).catch(() => {});
+      }, 5);
+
+      await processing;
+      const updated = await fastify.task.services.detail({ id: task.id });
+      expect(updated.status).to.equal('canceled');
+
+      await fs.remove(tempDir);
     });
   });
 
