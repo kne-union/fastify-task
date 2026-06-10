@@ -82,6 +82,65 @@ describe('@kne/fastify-task - timezone statistics', function () {
       }
     });
 
+    it('queryStatistics 应将小时子通道的服务端小时桶转换为客户端时区小时', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+
+      const dayjs = require('dayjs');
+      const utc = require('dayjs/plugin/utc');
+      const timezone = require('dayjs/plugin/timezone');
+      dayjs.extend(utc);
+      dayjs.extend(timezone);
+
+      const serverDay = new Date('2026-05-26T00:00:00.000Z');
+      const serverHour = 20;
+      const targetTimezone = ['Asia/Shanghai', 'UTC', 'Pacific/Honolulu', 'America/New_York']
+        .find(tz => dayjs(serverDay).hour(serverHour).minute(0).second(0).millisecond(0).tz(tz).hour() !== serverHour) || 'UTC';
+      const expectedTime = dayjs(serverDay).hour(serverHour).minute(0).second(0).millisecond(0).tz(targetTimezone);
+
+      fastify.taskStatistics.services.query.onFirstCall().resolves({
+        list: [
+          {
+            channel: 'test-type',
+            period: 'd',
+            time: serverDay,
+            data: { sum: { total: 1, success: 1, failed: 0, canceled: 0, waitingTime: 100, executionTime: 200, totalTime: 300 } }
+          }
+        ]
+      });
+      fastify.taskStatistics.services.query.onSecondCall().resolves({
+        list: [
+          {
+            channel: `test-type:manual:${serverHour}`,
+            period: 'd',
+            time: serverDay,
+            data: { sum: { total: 1, success: 1, failed: 0, canceled: 0, waitingTime: 100, executionTime: 200, totalTime: 300 } }
+          }
+        ]
+      });
+
+      const result = await fastify.task.services.queryStatistics({ range: '7d', timezone: targetTimezone });
+
+      expect(result.hourlyTrend).to.deep.include({
+        date: expectedTime.format('YYYY-MM-DD'),
+        hour: expectedTime.hour(),
+        total: 1,
+        success: 1,
+        failed: 0,
+        canceled: 0
+      });
+      expect(result.hourlyCompletionTrend).to.deep.include({
+        date: expectedTime.format('YYYY-MM-DD'),
+        hour: expectedTime.hour(),
+        type: 'test-type',
+        runnerType: 'manual',
+        totalCompleted: 1,
+        successCount: 1,
+        failedCount: 0,
+        canceledCount: 0
+      });
+    });
+
     it('queryStatistics 无时区时使用服务器本地时间', async () => {
       fastify = await createFastify();
       await fastify.ready();

@@ -43,6 +43,13 @@ const getHour = (date, tz) => {
   return d.hour();
 };
 
+const getZonedChannelHour = (periodTime, serverHour, tz) => {
+  if (!tz) return { date: formatDate(periodTime), hour: serverHour };
+  const localPeriodTime = dayjs(periodTime).hour(serverHour).minute(0).second(0).millisecond(0);
+  const zonedTime = localPeriodTime.tz(tz);
+  return { date: zonedTime.format('YYYY-MM-DD'), hour: zonedTime.hour() };
+};
+
 const safeNum = v => {
   const n = Number(v);
   return (typeof n === 'number' && !isNaN(n) ? n : 0);
@@ -333,10 +340,10 @@ const queryHourlyChildChannels = async (statisticsServices, { channels, startTim
 
     const sum = getSumData(item);
     const count = safeNum(sum.total);
-    const date = formatDate(item.time, tz);
+    const { date, hour } = getZonedChannelHour(item.time, completedHour, tz);
     mergeHourlyItem(result, {
       date,
-      hour: completedHour,
+      hour,
       typeName,
       runnerTypeName,
       count,
