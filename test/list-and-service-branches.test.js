@@ -211,7 +211,7 @@ describe('@kne/fastify-task - list filters and service branches', function () {
 
       const response = await fastify.inject({
         method: 'GET',
-        url: '/api/task/list?filter%5BtargetName%5D=Royal+Caribbean+Employee&perPage=20'
+        url: '/api/task/list?filter%5BtargetName%5D=Caribbean&perPage=20'
       });
       const result = JSON.parse(response.payload);
 
