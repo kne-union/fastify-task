@@ -212,7 +212,17 @@ const createContext = (fastify, options) => {
   const getTaskDeclaration = type => {
     const declaration = resolveTaskDeclaration(type);
     if (!declaration) {
-      throw new Error('未找到合法的任务声明');
+      const { taskName } = splitTaskName(type);
+      return registerTaskDeclaration({
+        namespace: mainNamespace,
+        taskName,
+        dirs: options.dirs,
+        scriptName: options.scriptName,
+        config: {},
+        override: false,
+        syncLegacyTask: false,
+        useGlobalDirs: true
+      }).declaration;
     }
     return declaration;
   };

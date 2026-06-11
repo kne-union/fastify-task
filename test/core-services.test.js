@@ -47,20 +47,19 @@ describe('@kne/fastify-task - core services', function () {
       expect(task.targetId).to.equal('target-1');
     });
 
-    it('should throw error when task type is not defined', async () => {
+    it('should auto-register and create task when type is not explicitly declared', async () => {
       fastify = await createFastify();
       await fastify.ready();
 
-      try {
-        await fastify.task.services.create({
-          type: 'undefined-type',
-          targetId: 'target-1',
-          targetType: 'document'
-        });
-        throw new Error('Should have thrown');
-      } catch (e) {
-        expect(e.message).to.include('未找到合法的任务声明');
-      }
+      const task = await fastify.task.services.create({
+        type: 'undefined-type',
+        targetId: 'target-1',
+        targetType: 'document'
+      });
+
+      expect(task).to.exist;
+      expect(task.type).to.equal('undefined-type');
+      expect(task.status).to.equal('pending');
     });
 
     it('should set delayed start time when delay is provided', async () => {
