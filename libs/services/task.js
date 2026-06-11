@@ -142,7 +142,36 @@ module.exports = fp(async (fastify, options) => {
     }
   };
 
-  const list = async ({ filter, perPage = 20, currentPage = 1, sort }) => {
+  const normalizeListQuery = (query = {}) => {
+    const normalized = Object.assign({}, query);
+
+    Object.entries(query || {}).forEach(([rawKey, value]) => {
+      const match = rawKey.match(/^(filter|sort)\[([^\]]+)\](?:\[([^\]]+)\])?$/);
+      if (!match) {
+        return;
+      }
+
+      const [, root, key, childKey] = match;
+      if (!normalized[root] || typeof normalized[root] !== 'object' || Array.isArray(normalized[root])) {
+        normalized[root] = {};
+      }
+
+      if (childKey) {
+        if (!normalized[root][key] || typeof normalized[root][key] !== 'object' || Array.isArray(normalized[root][key])) {
+          normalized[root][key] = {};
+        }
+        normalized[root][key][childKey] = value;
+      } else {
+        normalized[root][key] = value;
+      }
+      delete normalized[rawKey];
+    });
+
+    return normalized;
+  };
+
+  const list = async query => {
+    const { filter, perPage = 20, currentPage = 1, sort } = normalizeListQuery(query);
     const whereQuery = {};
 
     ['id', 'targetId', 'type', 'status', 'runnerType'].forEach(key => {
@@ -150,6 +179,10 @@ module.exports = fp(async (fastify, options) => {
         whereQuery[key] = filter[key];
       }
     });
+
+    if (filter && filter.targetName) {
+      whereQuery['input.name'] = filter.targetName;
+    }
 
     if (filter && filter.createdAt) {
       whereQuery.createdAt = getTimeQuery(filter.createdAt);

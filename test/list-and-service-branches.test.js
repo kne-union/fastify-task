@@ -191,6 +191,34 @@ describe('@kne/fastify-task - list filters and service branches', function () {
       });
       expect(result.totalCount).to.equal(2);
     });
+
+    it('should filter by targetName from bracket query string', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+
+      await fastify.task.services.create({
+        type: 'test-type',
+        targetId: 'target-1',
+        targetType: 'document',
+        input: { name: 'Royal Caribbean Employee' }
+      });
+      await fastify.task.services.create({
+        type: 'test-type',
+        targetId: 'target-2',
+        targetType: 'document',
+        input: { name: 'Other Employee' }
+      });
+
+      const response = await fastify.inject({
+        method: 'GET',
+        url: '/api/task/list?filter%5BtargetName%5D=Royal+Caribbean+Employee&perPage=20'
+      });
+      const result = JSON.parse(response.payload);
+
+      expect(response.statusCode).to.equal(200);
+      expect(result.totalCount).to.equal(1);
+      expect(result.pageData[0].input.name).to.equal('Royal Caribbean Employee');
+    });
   });
 
   describe('retry 批量测试', () => {
