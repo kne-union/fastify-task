@@ -4,6 +4,7 @@ const getTaskServiceContext = require('../helpers/task-service-context');
 module.exports = fp(async (fastify, options) => {
   const context = getTaskServiceContext(fastify, options);
   const { models, Op } = context;
+  const Sequelize = fastify.sequelize.Sequelize;
   const SORTABLE_FIELDS = new Set(['id', 'targetId', 'targetType', 'type', 'status', 'runnerType', 'priority', 'createdAt', 'updatedAt', 'startTime', 'startedAt', 'completedAt']);
 
   const cancel = async ({ id, targetId, targetType, type }) => {
@@ -170,6 +171,46 @@ module.exports = fp(async (fastify, options) => {
     return normalized;
   };
 
+  const quoteIdentifier = identifier => `"${String(identifier).replaceAll('"', '""')}"`;
+
+  const getJsonTextExpression = fieldPath => {
+    if (typeof Sequelize.literal !== 'function') {
+      return null;
+    }
+
+    const [field, key] = String(fieldPath).split('.');
+    const column = quoteIdentifier(models.task.rawAttributes?.[field]?.field || field);
+    const dialect = models.task.sequelize?.getDialect?.();
+
+    if (dialect === 'postgres') {
+      return Sequelize.literal(`${column}->>'${key}'`);
+    }
+
+    if (dialect === 'sqlite') {
+      return Sequelize.literal(`json_extract(${column}, '$.${key}')`);
+    }
+
+    return typeof Sequelize.json === 'function' ? Sequelize.json(fieldPath) : null;
+  };
+
+  const appendJsonFieldLikeFilter = (whereQuery, fieldPath, value) => {
+    const keyword = String(value).toLowerCase();
+    const condition = {
+      [Op.like]: `%${keyword}%`
+    };
+    const fallbackCondition = {
+      [Op.like]: `%${value}%`
+    };
+    const jsonTextExpression = getJsonTextExpression(fieldPath);
+
+    if (typeof Sequelize.where === 'function' && typeof Sequelize.fn === 'function' && jsonTextExpression && Op.and) {
+      whereQuery[Op.and] = [...(whereQuery[Op.and] || []), Sequelize.where(Sequelize.fn('lower', jsonTextExpression), condition)];
+      return;
+    }
+
+    whereQuery[fieldPath] = fallbackCondition;
+  };
+
   const list = async query => {
     const { filter, perPage = 20, currentPage = 1, sort } = normalizeListQuery(query);
     const whereQuery = {};
@@ -181,7 +222,7 @@ module.exports = fp(async (fastify, options) => {
     });
 
     if (filter && filter.targetName) {
-      whereQuery['input.name'] = filter.targetName;
+      appendJsonFieldLikeFilter(whereQuery, 'input.name', filter.targetName);
     }
 
     if (filter && filter.createdAt) {
