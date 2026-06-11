@@ -94,6 +94,10 @@ module.exports = fp(async (fastify, options) => {
                 targetId: {
                   type: 'string'
                 },
+                targetName: {
+                  type: 'string',
+                  description: '目标对象名称，对应任务 input.name'
+                },
                 type: {
                   type: 'string'
                 },
