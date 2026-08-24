@@ -6,6 +6,7 @@ module.exports = fp(async (fastify, options) => {
   const { models, Op } = context;
   const Sequelize = fastify.sequelize.Sequelize;
   const SORTABLE_FIELDS = new Set(['id', 'targetId', 'targetType', 'type', 'status', 'runnerType', 'priority', 'createdAt', 'updatedAt', 'startTime', 'startedAt', 'completedAt']);
+  const INTEGER_PRIORITY_MAX = 2147483647;
 
   const cancel = async ({ id, targetId, targetType, type }) => {
     if (!id && !(targetId && targetType && type)) {
@@ -74,7 +75,7 @@ module.exports = fp(async (fastify, options) => {
       await context.updateTaskByStatus({
         task,
         allowedStatuses: ['pending'],
-        updateData: { priority: Number.MAX_SAFE_INTEGER }
+        updateData: { priority: INTEGER_PRIORITY_MAX }
       });
       const claimedTask = await fastify[options.name].services.claimTask(task);
       if (claimedTask) {
