@@ -49,6 +49,26 @@ describe('@kne/fastify-task - polling and waiting complete', function () {
       expect(result).to.deep.equal({ result: 'success' });
     });
 
+    it('should cap boosted priority within integer range for pending task', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+
+      const task = await fastify.task.services.create({
+        type: 'test-type',
+        targetId: 'target-1',
+        targetType: 'document',
+        runnerType: 'system'
+      });
+
+      await fastify.task.services.waitingComplete({
+        id: task.id,
+        pollInterval: 10,
+        maxPollTimes: 50
+      });
+
+      expect(task.priority).to.equal(2147483647);
+    });
+
     it('should reject when task fails via waitingComplete', async () => {
       fastify = await createFastify();
       await fastify.ready();
