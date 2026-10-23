@@ -175,7 +175,7 @@ module.exports = fp(async (fastify, options) => {
       schema: {
         tags: [TAG],
         summary: '手动完成任务',
-        description: '人工把任务标记为成功或失败并记录完成人；成功时执行任务类型的完成回调，回调出错则转为失败；只有未结束的任务会被更新',
+        description: '人工把任务标记为成功或失败并记录完成人；成功时执行任务类型的完成回调，回调出错则转为失败；只有未结束的任务会被更新；只接受下列声明的字段，其它字段（如 context、userId）会被忽略',
         body: {
           type: 'object',
           properties: {
@@ -207,7 +207,9 @@ module.exports = fp(async (fastify, options) => {
       }
     },
     async request => {
-      await services.complete(Object.assign({}, request.body, { userId: request.userInfo?.id }));
+      // 只透传 schema 声明的字段，避免客户端借失败分支覆盖 context.secret 等任意列
+      const { id, status, error, msg, output } = request.body;
+      await services.complete({ id, status, error, msg, output, userId: request.userInfo?.id });
       return {};
     }
   );
