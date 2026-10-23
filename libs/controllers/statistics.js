@@ -1,4 +1,7 @@
 const fp = require('fastify-plugin');
+const { success, statistics } = require('../schema/response');
+
+const TAG = '任务-统计';
 
 module.exports = fp(async (fastify, options) => {
   const { services } = fastify[options.name];
@@ -8,7 +11,9 @@ module.exports = fp(async (fastify, options) => {
     {
       onRequest: options.getAuthenticate('statistics'),
       schema: {
+        tags: [TAG],
         summary: '获取任务统计概览',
+        description: '按时间范围汇总已结束任务的数量、状态/类型/执行方式分布、每日与按小时趋势及耗时；不支持的 range 报错，其他查询异常时返回空统计',
         query: {
           type: 'object',
           properties: {
@@ -17,7 +22,8 @@ module.exports = fp(async (fastify, options) => {
             type: { type: 'string', description: '按任务类型筛选' },
             runnerType: { type: 'string', description: '按执行方式筛选 manual / system' }
           }
-        }
+        },
+        response: success('任务统计数据', statistics)
       }
     },
     async request => {
@@ -32,7 +38,9 @@ module.exports = fp(async (fastify, options) => {
     {
       onRequest: options.getAuthenticate('statistics'),
       schema: {
+        tags: [TAG],
         summary: 'SSE实时推送任务统计数据',
+        description: '以 text/event-stream 长连接按 interval 推送实时统计（当天各状态数量、执行中/等待中任务数等），客户端断开后停止',
         query: {
           type: 'object',
           properties: {
@@ -42,7 +50,8 @@ module.exports = fp(async (fastify, options) => {
             runnerType: { type: 'string', description: '按执行方式筛选 manual / system' },
             interval: { type: 'integer', minimum: 1, default: 5, description: '推送间隔时间（秒），最小1秒，默认5秒' }
           }
-        }
+        },
+        response: { 200: { description: 'text/event-stream 事件流，每条 data 为实时统计 JSON' } }
       }
     },
     async (request, reply) => {

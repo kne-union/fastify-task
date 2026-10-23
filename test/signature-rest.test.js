@@ -357,6 +357,67 @@ describe('@kne/fastify-task - signatures and rest endpoints', function () {
       expect(response.statusCode).to.equal(200);
     });
 
+    it('POST /complete failed should ignore undeclared fields such as context.secret', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+
+      const created = await fastify.task.services.create({
+        type: 'test-type',
+        targetId: 'target-1',
+        targetType: 'document',
+        runnerType: 'manual',
+        context: { secret: 'origin-secret' }
+      });
+
+      const response = await fastify.inject({
+        method: 'POST',
+        url: '/api/task/complete',
+        payload: {
+          id: created.id,
+          status: 'failed',
+          error: '人工失败',
+          msg: '失败说明',
+          context: { secret: 'attacker-secret' },
+          userId: 'attacker',
+          targetId: 'other-target',
+          completedUserId: 'attacker'
+        }
+      });
+      expect(response.statusCode).to.equal(200);
+
+      const task = await fastify.task.services.detail({ id: created.id });
+      expect(task.status).to.equal('failed');
+      expect(task.error).to.equal('人工失败');
+      expect(task.msg).to.equal('失败说明');
+      expect(task.context).to.deep.equal({ secret: 'origin-secret' });
+      expect(task.userId).to.not.equal('attacker');
+      expect(task.targetId).to.equal('target-1');
+      expect(task.completedUserId).to.not.equal('attacker');
+    });
+
+    it('POST /complete success should still save output', async () => {
+      fastify = await createFastify();
+      await fastify.ready();
+
+      const created = await fastify.task.services.create({
+        type: 'test-type',
+        targetId: 'target-1',
+        targetType: 'document',
+        runnerType: 'manual'
+      });
+
+      const response = await fastify.inject({
+        method: 'POST',
+        url: '/api/task/complete',
+        payload: { id: created.id, status: 'success', output: { result: 'done' } }
+      });
+      expect(response.statusCode).to.equal(200);
+
+      const task = await fastify.task.services.detail({ id: created.id });
+      expect(task.status).to.equal('success');
+      expect(task.output).to.deep.equal({ result: 'done' });
+    });
+
     it('POST /retry should retry task via REST', async () => {
       fastify = await createFastify();
       await fastify.ready();
