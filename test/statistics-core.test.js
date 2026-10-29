@@ -285,10 +285,7 @@ describe('@kne/fastify-task - statistics core queries', function () {
         const result = await fastify.task.services.queryStatistics({ range: '1y', timezone: 'Asia/Shanghai' });
 
         expect(result.granularity).to.equal('month');
-        expect(result.buckets.map(b => b.key)).to.deep.equal([
-          '2025-07', '2025-08', '2025-09', '2025-10', '2025-11', '2025-12',
-          '2026-01', '2026-02', '2026-03', '2026-04', '2026-05', '2026-06'
-        ]);
+        expect(result.buckets.map(b => b.key)).to.deep.equal(['2025-07', '2025-08', '2025-09', '2025-10', '2025-11', '2025-12', '2026-01', '2026-02', '2026-03', '2026-04', '2026-05', '2026-06']);
         const countOf = key => result.recentTrend.find(t => t.date === key).count;
         expect(countOf('2026-01')).to.equal(9);
         expect(countOf('2026-04')).to.equal(4);
