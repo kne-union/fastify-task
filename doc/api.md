@@ -207,7 +207,11 @@
 ```json
 {
   "range": "7d",
-  "rangeLabel": "最近7天",
+  "rangeLabel": "近7天",
+  "granularity": "day",
+  "startTime": "2026-05-23T16:00:00.000Z",
+  "endTime": "2026-05-29T12:00:00.000Z",
+  "buckets": [{ "key": "2026-05-24", "start": "2026-05-23T16:00:00.000Z", "end": "2026-05-24T16:00:00.000Z" }],
   "totalTasks": 0,
   "byStatus": {},
   "byType": {},
@@ -216,10 +220,22 @@
   "recentTrendByStatus": [],
   "recentTrendByType": [],
   "durationTrend": [],
+  "duration": {},
   "hourlyTrend": [],
   "hourlyCompletionTrend": []
 }
 ```
+
+趋势按 `granularity` 分桶，每个桶单独查询，`recentTrend` / `recentTrendByStatus` 覆盖全部桶（无数据补 0），`date` 为桶 key：
+
+| range | granularity | 桶数 | 桶 key 格式                |
+|-------|-------------|----|-------------------------|
+| `7d`  | `day`       | 7  | `YYYY-MM-DD`            |
+| `1m`  | `day`       | 30 | `YYYY-MM-DD`            |
+| `3m`  | `week`      | 13 | `YYYY-MM-DD`（周一）        |
+| `1y`  | `month`     | 12 | `YYYY-MM`               |
+
+`duration` 为范围内耗时汇总（平均等待 / 执行 / 总耗时，毫秒），含 `byType`、`byRunnerType`、`byTypeByRunnerType` 拆分。
 
 #### GET `{prefix}/statistics/sse`
 

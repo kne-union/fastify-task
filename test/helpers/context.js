@@ -404,4 +404,21 @@ const createTestContext = () => {
   return { createFastify, reset, restore };
 };
 
-module.exports = { createTestContext };
+// 模拟 fastify-statistics.query：只返回请求 channels 内、落在 [startTime, endTime) 的条目；
+// 截止到当前时间的窗口包含 endTime（对应实时 data-record 查询）
+const mockStatQuery = (queryStub, list) =>
+  queryStub.callsFake(async ({ channels, startTime, endTime }) => {
+    const channelSet = new Set(channels);
+    const start = new Date(startTime).getTime();
+    const end = new Date(endTime).getTime();
+    const endInclusive = end >= Date.now() - 1000;
+    return {
+      channelMetas: {},
+      list: list.filter(item => {
+        const t = new Date(item.time).getTime();
+        return channelSet.has(item.channel) && t >= start && (t < end || (endInclusive && t === end));
+      })
+    };
+  });
+
+module.exports = { createTestContext, mockStatQuery };

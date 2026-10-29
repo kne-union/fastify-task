@@ -2,7 +2,17 @@ const { expect } = require('chai');
 const sinon = require('sinon');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { createTestContext } = require('./helpers/context');
+const { createTestContext, mockStatQuery } = require('./helpers/context');
+
+// 历史统计按桶查询，需把「现在」固定在测试数据之后
+const withClock = async (isoTime, fn) => {
+  const clock = sinon.useFakeTimers({ now: new Date(isoTime), toFake: ['Date'] });
+  try {
+    return await fn();
+  } finally {
+    clock.restore();
+  }
+};
 
 describe('@kne/fastify-task - timezone statistics', function () {
   this.timeout(10000);
@@ -98,28 +108,24 @@ describe('@kne/fastify-task - timezone statistics', function () {
         .find(tz => dayjs(serverDay).hour(serverHour).minute(0).second(0).millisecond(0).tz(tz).hour() !== serverHour) || 'UTC';
       const expectedTime = dayjs(serverDay).hour(serverHour).minute(0).second(0).millisecond(0).tz(targetTimezone);
 
-      fastify.taskStatistics.services.query.onFirstCall().resolves({
-        list: [
-          {
-            channel: 'test-type',
-            period: 'd',
-            time: serverDay,
-            data: { sum: { total: 1, success: 1, failed: 0, canceled: 0, waitingTime: 100, executionTime: 200, totalTime: 300 } }
-          }
-        ]
-      });
-      fastify.taskStatistics.services.query.onSecondCall().resolves({
-        list: [
-          {
-            channel: `test-type:manual:${serverHour}`,
-            period: 'd',
-            time: serverDay,
-            data: { sum: { total: 1, success: 1, failed: 0, canceled: 0, waitingTime: 100, executionTime: 200, totalTime: 300 } }
-          }
-        ]
-      });
+      mockStatQuery(fastify.taskStatistics.services.query, [
+        {
+          channel: 'test-type',
+          period: 'd',
+          time: serverDay,
+          data: { sum: { total: 1, success: 1, failed: 0, canceled: 0, waitingTime: 100, executionTime: 200, totalTime: 300 } }
+        },
+        {
+          channel: `test-type:manual:${serverHour}`,
+          period: 'd',
+          time: serverDay,
+          data: { sum: { total: 1, success: 1, failed: 0, canceled: 0, waitingTime: 100, executionTime: 200, totalTime: 300 } }
+        }
+      ]);
 
-      const result = await fastify.task.services.queryStatistics({ range: '7d', timezone: targetTimezone });
+      const result = await withClock('2026-05-29T12:00:00.000Z', () =>
+        fastify.task.services.queryStatistics({ range: '7d', timezone: targetTimezone })
+      );
 
       expect(result.hourlyTrend).to.deep.include({
         date: expectedTime.format('YYYY-MM-DD'),
@@ -179,29 +185,28 @@ describe('@kne/fastify-task - timezone statistics', function () {
 
       // UTC 时间 2026-05-28T22:00:00Z，在 UTC+8 下是 2026-05-29 06:00
       const serverTime = new Date('2026-05-28T22:00:00.000Z');
-      fastify.taskStatistics.services.query.resolves({
-        list: [
-          {
-            channel: 'test-type',
-            period: 'h',
-            time: serverTime,
-            data: { sum: { total: 2, success: 1, failed: 1, canceled: 0, waitingTime: 500, executionTime: 1000, totalTime: 1500 } }
-          },
-          {
-            channel: 'test-type:manual',
-            period: 'h',
-            time: serverTime,
-            data: { sum: { total: 1, success: 1, failed: 0, canceled: 0, waitingTime: 200, executionTime: 500, totalTime: 700 } }
-          }
-        ]
-      });
+      mockStatQuery(fastify.taskStatistics.services.query, [
+        {
+          channel: 'test-type',
+          period: 'h',
+          time: serverTime,
+          data: { sum: { total: 2, success: 1, failed: 1, canceled: 0, waitingTime: 500, executionTime: 1000, totalTime: 1500 } }
+        },
+        {
+          channel: 'test-type:manual',
+          period: 'h',
+          time: serverTime,
+          data: { sum: { total: 1, success: 1, failed: 0, canceled: 0, waitingTime: 200, executionTime: 500, totalTime: 700 } }
+        }
+      ]);
 
-      const result = await fastify.task.services.queryStatistics({ range: '7d', timezone: 'Asia/Shanghai' });
+      const result = await withClock('2026-05-29T12:00:00.000Z', () =>
+        fastify.task.services.queryStatistics({ range: '7d', timezone: 'Asia/Shanghai' })
+      );
 
       // 日期应为 2026-05-29（CST），而非 2026-05-28（UTC）
-      if (result.recentTrend.length > 0) {
-        expect(result.recentTrend.some(t => t.date === '2026-05-29')).to.be.true;
-      }
+      expect(result.recentTrend.find(t => t.date === '2026-05-29').count).to.equal(2);
+      expect(result.recentTrend.find(t => t.date === '2026-05-28').count).to.equal(0);
       if (result.hourlyTrend.length > 0) {
         expect(result.hourlyTrend[0].date).to.equal('2026-05-29');
         // UTC+8 下 22:00 UTC = 06:00 CST
@@ -286,42 +291,42 @@ describe('@kne/fastify-task - timezone statistics', function () {
       const day1ServerTime = new Date('2026-05-27T22:00:00.000Z');
       const day2ServerTime = new Date('2026-05-28T22:00:00.000Z');
 
-      fastify.taskStatistics.services.query.resolves({
-        list: [
-          {
-            channel: 'test-type',
-            period: 'h',
-            time: day1ServerTime,
-            data: { sum: { total: 3, success: 2, failed: 1, canceled: 0, waitingTime: 500, executionTime: 1000, totalTime: 1500 } }
-          },
-          {
-            channel: 'test-type:manual',
-            period: 'h',
-            time: day1ServerTime,
-            data: { sum: { total: 2, success: 1, failed: 1, canceled: 0, waitingTime: 300, executionTime: 800, totalTime: 1100 } }
-          },
-          {
-            channel: 'test-type',
-            period: 'h',
-            time: day2ServerTime,
-            data: { sum: { total: 4, success: 3, failed: 0, canceled: 1, waitingTime: 600, executionTime: 1200, totalTime: 1800 } }
-          },
-          {
-            channel: 'test-type:manual',
-            period: 'h',
-            time: day2ServerTime,
-            data: { sum: { total: 2, success: 2, failed: 0, canceled: 0, waitingTime: 200, executionTime: 600, totalTime: 800 } }
-          }
-        ]
-      });
+      mockStatQuery(fastify.taskStatistics.services.query, [
+        {
+          channel: 'test-type',
+          period: 'h',
+          time: day1ServerTime,
+          data: { sum: { total: 3, success: 2, failed: 1, canceled: 0, waitingTime: 500, executionTime: 1000, totalTime: 1500 } }
+        },
+        {
+          channel: 'test-type:manual',
+          period: 'h',
+          time: day1ServerTime,
+          data: { sum: { total: 2, success: 1, failed: 1, canceled: 0, waitingTime: 300, executionTime: 800, totalTime: 1100 } }
+        },
+        {
+          channel: 'test-type',
+          period: 'h',
+          time: day2ServerTime,
+          data: { sum: { total: 4, success: 3, failed: 0, canceled: 1, waitingTime: 600, executionTime: 1200, totalTime: 1800 } }
+        },
+        {
+          channel: 'test-type:manual',
+          period: 'h',
+          time: day2ServerTime,
+          data: { sum: { total: 2, success: 2, failed: 0, canceled: 0, waitingTime: 200, executionTime: 600, totalTime: 800 } }
+        }
+      ]);
 
-      const result = await fastify.task.services.queryStatistics({ range: '7d', timezone: 'Asia/Shanghai' });
+      const result = await withClock('2026-05-29T12:00:00.000Z', () =>
+        fastify.task.services.queryStatistics({ range: '7d', timezone: 'Asia/Shanghai' })
+      );
 
-      // 应有两天数据，日期分别为 2026-05-28 和 2026-05-29（CST）
-      expect(result.recentTrend.length).to.equal(2);
-      const dates = result.recentTrend.map(t => t.date).sort();
-      expect(dates).to.include('2026-05-28');
-      expect(dates).to.include('2026-05-29');
+      // 7 个桶连续输出，数据落在 2026-05-28 和 2026-05-29（CST）
+      expect(result.recentTrend.length).to.equal(7);
+      const countOf = date => result.recentTrend.find(t => t.date === date).count;
+      expect(countOf('2026-05-28')).to.equal(3);
+      expect(countOf('2026-05-29')).to.equal(4);
 
       // durationTrend 也应有两天
       expect(result.durationTrend.length).to.equal(2);

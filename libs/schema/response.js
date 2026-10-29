@@ -58,14 +58,19 @@ const statistics = {
   properties: {
     range: str('时间范围：7d / 1m / 3m / 1y'),
     rangeLabel: str('时间范围名称，如「近7天」'),
+    granularity: str('趋势粒度：7d / 1m 为 day，3m 为 week（周一起），1y 为 month'),
+    startTime: any('统计起始时间（第一个桶的起点）'),
+    endTime: any('统计截止时间（当前时间）'),
+    buckets: any('趋势桶列表，每项为 { key, start, end }；key 为 YYYY-MM-DD（日 / 周起始日）或 YYYY-MM（月）'),
     totalTasks: num('范围内已结束（成功、失败、取消）的任务总数'),
     byStatus: any('按状态统计的任务数，键为 success / failed / canceled'),
     byType: any('按任务类型统计的任务数，键为任务类型'),
     byRunnerType: any('按执行方式统计的任务数，键为 manual / system'),
-    recentTrend: any('每日趋势，每项为 { date, count }'),
-    recentTrendByStatus: any('每日按状态趋势，每项为 { date, status, count }'),
-    recentTrendByType: any('每日按类型趋势，每项为 { date, type, count }'),
-    durationTrend: any('每日耗时趋势，每项含 date、完成/成功/失败数及平均等待、执行、总耗时（毫秒）'),
+    recentTrend: any('按桶趋势，每项为 { date, count }，date 为桶 key，无数据的桶补 0'),
+    recentTrendByStatus: any('按桶按状态趋势，每项为 { date, status, count }，每个桶都含 success / failed / canceled'),
+    recentTrendByType: any('按桶按类型趋势，每项为 { date, type, count }'),
+    durationTrend: any('按桶耗时趋势，每项含 date（桶 key）、完成/成功/失败数及平均等待、执行、总耗时（毫秒）'),
+    duration: any('范围内耗时汇总：完成/成功/失败/取消数，平均等待、执行、总耗时（毫秒），及 byType / byRunnerType / byTypeByRunnerType 拆分'),
     hourlyTrend: any('按小时趋势，每项为 { date, hour, total, success, failed, canceled }；查询失败或无数据时不返回'),
     hourlyCompletionTrend: any('按小时、类型、执行方式的完成明细，每项含 date、hour、type、runnerType 及完成/成功/失败/取消数')
   }

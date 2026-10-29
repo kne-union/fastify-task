@@ -17,6 +17,8 @@ const createContext = (fastify, options) => {
     if (task.reload && typeof task.reload === 'function') {
       await task.reload();
     }
+    // errorHandler 重试会把任务改回 pending，此时任务未结束，等最终结束时再采集
+    if (!TERMINAL_STATUSES.includes(task.status)) return;
     const completedAt = task.completedAt || new Date();
     const createdAt = task.createdAt;
     const startedAt = task.startedAt;
