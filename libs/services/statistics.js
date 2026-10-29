@@ -79,7 +79,7 @@ const getZonedChannelHour = (periodTime, serverHour, tz) => {
 
 const safeNum = v => {
   const n = Number(v);
-  return (typeof n === 'number' && !isNaN(n) ? n : 0);
+  return typeof n === 'number' && !isNaN(n) ? n : 0;
 };
 
 const getSumData = item => (item.data || {}).sum || item.data || {};
@@ -151,9 +151,17 @@ const createDailyMapEntry = () => ({ total: 0, byStatus: { success: 0, failed: 0
 
 // 创建空的 dailyDurationMap 条目
 const createDailyDurationEntry = () => ({
-  completedCount: 0, successCount: 0, failedCount: 0, canceledCount: 0,
-  sumWaiting: 0, sumExecution: 0, sumTotal: 0, countWithTiming: 0,
-  byType: {}, byRunnerType: {}, byTypeByRunnerType: {}
+  completedCount: 0,
+  successCount: 0,
+  failedCount: 0,
+  canceledCount: 0,
+  sumWaiting: 0,
+  sumExecution: 0,
+  sumTotal: 0,
+  countWithTiming: 0,
+  byType: {},
+  byRunnerType: {},
+  byTypeByRunnerType: {}
 });
 
 const createHourlyAccumulator = () => ({
@@ -209,9 +217,17 @@ const parseStatList = (list, { timezone: tz, runnerType: runnerTypeFilter, resol
     hourlyTypeMap: {},
     hourlyDetailMap: {},
     duration: {
-      completedCount: 0, successCount: 0, failedCount: 0, canceledCount: 0,
-      sumWaiting: 0, sumExecution: 0, sumTotal: 0, countWithTiming: 0,
-      byType: {}, byRunnerType: {}, byTypeByRunnerType: {}
+      completedCount: 0,
+      successCount: 0,
+      failedCount: 0,
+      canceledCount: 0,
+      sumWaiting: 0,
+      sumExecution: 0,
+      sumTotal: 0,
+      countWithTiming: 0,
+      byType: {},
+      byRunnerType: {},
+      byTypeByRunnerType: {}
     },
     durationTrend: []
   };
@@ -219,8 +235,7 @@ const parseStatList = (list, { timezone: tz, runnerType: runnerTypeFilter, resol
 
   for (const item of list || []) {
     const { type: typeName, runnerType: runnerTypeName } = parseChannel(item.channel);
-    if (runnerTypeFilter && runnerTypeName && runnerTypeName !== runnerTypeFilter) continue;
-    if (runnerTypeFilter && !runnerTypeName) continue;
+    if (runnerTypeFilter && runnerTypeName !== runnerTypeFilter) continue;
 
     const sum = getSumData(item);
     // 任务数只认终态：旧版本在失败重试（任务回到 pending）时也会采集一条，total 里混有这类非终态记录
@@ -233,7 +248,8 @@ const parseStatList = (list, { timezone: tz, runnerType: runnerTypeFilter, resol
     const hour = isHourly ? getHour(item.time, tz) : null;
 
     // ─── 1-segment channel: 全局 + 按日 + 时长 聚合 ───
-    if (!runnerTypeName) {
+    // 按 runnerType 筛选时只查询了 2 段 channel，汇总改由匹配的 2 段 channel 提供
+    if (runnerTypeFilter || !runnerTypeName) {
       // 全局汇总
       result.totalTasks += count;
       result.byStatus.success += safeNum(sum.success);
@@ -297,11 +313,7 @@ const parseStatList = (list, { timezone: tz, runnerType: runnerTypeFilter, resol
           if (!dailyDurationMap[date].byTypeByRunnerType[runnerTypeName]) {
             dailyDurationMap[date].byTypeByRunnerType[runnerTypeName] = {};
           }
-          accumDuration(
-            ensureDurationAcc(dailyDurationMap[date].byTypeByRunnerType[runnerTypeName], typeName),
-            timingCount,
-            sum
-          );
+          accumDuration(ensureDurationAcc(dailyDurationMap[date].byTypeByRunnerType[runnerTypeName], typeName), timingCount, sum);
         }
       }
 
@@ -326,12 +338,7 @@ const parseStatList = (list, { timezone: tz, runnerType: runnerTypeFilter, resol
       avgTotalTime: computeAvg(dd.sumTotal, dd.countWithTiming),
       byType: Object.fromEntries(Object.entries(dd.byType).map(([n, td]) => [n, toAvgDuration(td)])),
       byRunnerType: Object.fromEntries(Object.entries(dd.byRunnerType).map(([n, rt]) => [n, toAvgDuration(rt)])),
-      byTypeByRunnerType: Object.fromEntries(
-        Object.entries(dd.byTypeByRunnerType).map(([rtName, types]) => [
-          rtName,
-          Object.fromEntries(Object.entries(types).map(([typeName, td]) => [typeName, toAvgDuration(td)]))
-        ])
-      )
+      byTypeByRunnerType: Object.fromEntries(Object.entries(dd.byTypeByRunnerType).map(([rtName, types]) => [rtName, Object.fromEntries(Object.entries(types).map(([typeName, td]) => [typeName, toAvgDuration(td)]))]))
     }));
 
   return result;
@@ -340,7 +347,9 @@ const parseStatList = (list, { timezone: tz, runnerType: runnerTypeFilter, resol
 const queryAndParse = async (statisticsServices, { channels, startTime, endTime, timezone: tz, runnerType }) => {
   if (channels.length === 0) return null;
   const statResult = await statisticsServices.query({
-    channels, startTime, endTime,
+    channels,
+    startTime,
+    endTime,
     attributeNames: STAT_ATTRS,
     aggregates: ['sum'],
     timezone: tz || undefined
@@ -371,7 +380,9 @@ const queryHourlyChildChannels = async (statisticsServices, { channels, startTim
   if (hourlyChannels.length === 0) return null;
 
   const statResult = await statisticsServices.query({
-    channels: hourlyChannels, startTime, endTime,
+    channels: hourlyChannels,
+    startTime,
+    endTime,
     attributeNames: STAT_ATTRS,
     aggregates: ['sum'],
     timezone: tz || undefined
@@ -400,7 +411,7 @@ const queryHourlyChildChannels = async (statisticsServices, { channels, startTim
 };
 
 // 构建 todayDuration 结果
-const buildDurationResult = (d) => ({
+const buildDurationResult = d => ({
   completedCount: d.completedCount,
   successCount: d.successCount,
   failedCount: d.failedCount,
@@ -410,16 +421,11 @@ const buildDurationResult = (d) => ({
   avgTotalTime: computeAvg(d.sumTotal, d.countWithTiming),
   byType: Object.fromEntries(Object.entries(d.byType).map(([n, td]) => [n, toAvgDuration(td)])),
   byRunnerType: Object.fromEntries(Object.entries(d.byRunnerType).map(([n, rt]) => [n, toAvgDuration(rt)])),
-  byTypeByRunnerType: Object.fromEntries(
-    Object.entries(d.byTypeByRunnerType).map(([rtName, types]) => [
-      rtName,
-      Object.fromEntries(Object.entries(types).map(([typeName, td]) => [typeName, toAvgDuration(td)]))
-    ])
-  )
+  byTypeByRunnerType: Object.fromEntries(Object.entries(d.byTypeByRunnerType).map(([rtName, types]) => [rtName, Object.fromEntries(Object.entries(types).map(([typeName, td]) => [typeName, toAvgDuration(td)]))]))
 });
 
 // 构建小时趋势数组（完整格式，供 history 接口使用）
-const buildHourlyTrendArrays = (parsed) => {
+const buildHourlyTrendArrays = parsed => {
   const hourlyTrend = [];
   const hourlyTrendByStatus = [];
   const hourlyTrendByType = [];
@@ -432,17 +438,13 @@ const buildHourlyTrendArrays = (parsed) => {
     const typeMap = parsed.hourlyTypeMap[date] || {};
     const detailMap = parsed.hourlyDetailMap[date] || {};
 
-    const allHours = [...new Set([
-      ...Object.keys(hoursMap).map(Number),
-      ...Object.keys(statusMap).map(Number),
-      ...Object.keys(typeMap).map(Number),
-      ...Object.keys(detailMap).map(Number)
-    ])].sort((a, b) => a - b);
+    const allHours = [...new Set([...Object.keys(hoursMap).map(Number), ...Object.keys(statusMap).map(Number), ...Object.keys(typeMap).map(Number), ...Object.keys(detailMap).map(Number)])].sort((a, b) => a - b);
 
     for (const hour of allHours) {
       const statuses = statusMap[hour] || {};
       hourlyTrend.push({
-        date, hour,
+        date,
+        hour,
         total: hoursMap[hour] || 0,
         success: statuses.success || 0,
         failed: statuses.failed || 0,
@@ -457,13 +459,18 @@ const buildHourlyTrendArrays = (parsed) => {
       }
     }
 
-    for (const hour of Object.keys(detailMap).map(Number).sort((a, b) => a - b)) {
+    for (const hour of Object.keys(detailMap)
+      .map(Number)
+      .sort((a, b) => a - b)) {
       const types = detailMap[hour] || {};
       for (const [typeName, runnerTypes] of Object.entries(types)) {
         for (const [runnerTypeName, detail] of Object.entries(runnerTypes)) {
           if (detail.total > 0) {
             hourlyCompletionTrend.push({
-              date, hour, type: typeName, runnerType: runnerTypeName,
+              date,
+              hour,
+              type: typeName,
+              runnerType: runnerTypeName,
               totalCompleted: detail.total,
               successCount: detail.success,
               failedCount: detail.failed,
@@ -513,9 +520,14 @@ module.exports = fp(async (fastify, options) => {
     };
     const emptyResult = {
       ...rangeMeta,
-      totalTasks: 0, byStatus: {}, byType: {}, byRunnerType: {},
+      totalTasks: 0,
+      byStatus: {},
+      byType: {},
+      byRunnerType: {},
       ...buildDailyTrendArrays({ dailyMap: {} }, bucketKeys),
-      durationTrend: [], duration: null, hourlyCompletionTrend: []
+      durationTrend: [],
+      duration: null,
+      hourlyCompletionTrend: []
     };
     try {
       const channels = await buildChannels(statisticsServices, type, runnerType);
@@ -532,10 +544,13 @@ module.exports = fp(async (fastify, options) => {
         byStatus: parsed.byStatus,
         byType: parsed.byType,
         byRunnerType: parsed.byRunnerType,
-        recentTrend, recentTrendByStatus, recentTrendByType,
+        recentTrend,
+        recentTrendByStatus,
+        recentTrendByType,
         durationTrend: parsed.durationTrend,
         duration: buildDurationResult(parsed.duration),
-        hourlyTrend, hourlyCompletionTrend
+        hourlyTrend,
+        hourlyCompletionTrend
       };
     } catch (e) {
       fastify.log.error(`查询统计数据失败: ${e.message}`);
@@ -556,7 +571,8 @@ module.exports = fp(async (fastify, options) => {
       TaskModel.findAll({
         attributes: ['runnerType', 'status', [fn('COUNT', col('id')), 'count']],
         where: { ...(runnerType ? { runnerType } : {}) },
-        group: ['runnerType', 'status'], raw: true
+        group: ['runnerType', 'status'],
+        raw: true
       }),
       TaskModel.findAll({
         attributes: ['runnerType', 'createdAt'],
@@ -620,9 +636,16 @@ module.exports = fp(async (fastify, options) => {
     let hourlyTrendByType = [];
     let intervalTrend = [];
     let todayDuration = {
-      completedCount: 0, successCount: 0, failedCount: 0, canceledCount: 0,
-      avgWaitingTime: 0, avgExecutionTime: 0, avgTotalTime: 0,
-      byType: {}, byRunnerType: {}, byTypeByRunnerType: {}
+      completedCount: 0,
+      successCount: 0,
+      failedCount: 0,
+      canceledCount: 0,
+      avgWaitingTime: 0,
+      avgExecutionTime: 0,
+      avgTotalTime: 0,
+      byType: {},
+      byRunnerType: {},
+      byTypeByRunnerType: {}
     };
 
     try {
@@ -639,17 +662,11 @@ module.exports = fp(async (fastify, options) => {
         const hourlyArrays = buildHourlyTrendArrays(parsed);
 
         // SSE 格式：简化为 {hour, count}，只取当天
-        hourlyTrend = hourlyArrays.hourlyTrend
-          .filter(h => h.date === todayStr)
-          .map(({ hour, total }) => ({ hour, count: total }));
+        hourlyTrend = hourlyArrays.hourlyTrend.filter(h => h.date === todayStr).map(({ hour, total }) => ({ hour, count: total }));
 
-        hourlyTrendByStatus = hourlyArrays.hourlyTrendByStatus
-          .filter(h => h.date === todayStr)
-          .map(({ hour, status, count }) => ({ hour, status, count }));
+        hourlyTrendByStatus = hourlyArrays.hourlyTrendByStatus.filter(h => h.date === todayStr).map(({ hour, status, count }) => ({ hour, status, count }));
 
-        hourlyTrendByType = hourlyArrays.hourlyTrendByType
-          .filter(h => h.date === todayStr)
-          .map(({ hour, type, count }) => ({ hour, type, count }));
+        hourlyTrendByType = hourlyArrays.hourlyTrendByType.filter(h => h.date === todayStr).map(({ hour, type, count }) => ({ hour, type, count }));
 
         intervalTrend = hourlyTrend.map(({ hour, count }) => ({
           interval: `${String(hour).padStart(2, '0')}:00`,

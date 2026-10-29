@@ -104,8 +104,7 @@ describe('@kne/fastify-task - timezone statistics', function () {
 
       const serverDay = new Date('2026-05-26T00:00:00.000Z');
       const serverHour = 20;
-      const targetTimezone = ['Asia/Shanghai', 'UTC', 'Pacific/Honolulu', 'America/New_York']
-        .find(tz => dayjs(serverDay).hour(serverHour).minute(0).second(0).millisecond(0).tz(tz).hour() !== serverHour) || 'UTC';
+      const targetTimezone = ['Asia/Shanghai', 'UTC', 'Pacific/Honolulu', 'America/New_York'].find(tz => dayjs(serverDay).hour(serverHour).minute(0).second(0).millisecond(0).tz(tz).hour() !== serverHour) || 'UTC';
       const expectedTime = dayjs(serverDay).hour(serverHour).minute(0).second(0).millisecond(0).tz(targetTimezone);
 
       mockStatQuery(fastify.taskStatistics.services.query, [
@@ -123,9 +122,7 @@ describe('@kne/fastify-task - timezone statistics', function () {
         }
       ]);
 
-      const result = await withClock('2026-05-29T12:00:00.000Z', () =>
-        fastify.task.services.queryStatistics({ range: '7d', timezone: targetTimezone })
-      );
+      const result = await withClock('2026-05-29T12:00:00.000Z', () => fastify.task.services.queryStatistics({ range: '7d', timezone: targetTimezone }));
 
       expect(result.hourlyTrend).to.deep.include({
         date: expectedTime.format('YYYY-MM-DD'),
@@ -200,9 +197,7 @@ describe('@kne/fastify-task - timezone statistics', function () {
         }
       ]);
 
-      const result = await withClock('2026-05-29T12:00:00.000Z', () =>
-        fastify.task.services.queryStatistics({ range: '7d', timezone: 'Asia/Shanghai' })
-      );
+      const result = await withClock('2026-05-29T12:00:00.000Z', () => fastify.task.services.queryStatistics({ range: '7d', timezone: 'Asia/Shanghai' }));
 
       // 日期应为 2026-05-29（CST），而非 2026-05-28（UTC）
       expect(result.recentTrend.find(t => t.date === '2026-05-29').count).to.equal(2);
@@ -318,9 +313,7 @@ describe('@kne/fastify-task - timezone statistics', function () {
         }
       ]);
 
-      const result = await withClock('2026-05-29T12:00:00.000Z', () =>
-        fastify.task.services.queryStatistics({ range: '7d', timezone: 'Asia/Shanghai' })
-      );
+      const result = await withClock('2026-05-29T12:00:00.000Z', () => fastify.task.services.queryStatistics({ range: '7d', timezone: 'Asia/Shanghai' }));
 
       // 7 个桶连续输出，数据落在 2026-05-28 和 2026-05-29（CST）
       expect(result.recentTrend.length).to.equal(7);

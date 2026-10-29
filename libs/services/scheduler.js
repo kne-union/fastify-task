@@ -63,12 +63,17 @@ module.exports = fp(async (fastify, options) => {
       return fastify[options.name].services.log(Object.assign({}, props, { taskId: task.id }));
     };
 
-    const createTimeout = ms => new Promise((_, reject) => setTimeout(() => reject(new Error(`任务执行超时(${ms}ms)`)), ms));
+    let timeoutTimer;
+    const createTimeout = ms =>
+      new Promise((_, reject) => {
+        timeoutTimer = setTimeout(() => reject(new Error(`任务执行超时(${ms}ms)`)), ms);
+      });
 
     const executorPromise = context.executor({ type: task.type, scriptName: task.scriptName, task, log: addLog });
     const racePromise = options.taskTimeout > 0 ? Promise.race([executorPromise, createTimeout(options.taskTimeout)]) : executorPromise;
 
     return racePromise
+      .finally(() => clearTimeout(timeoutTimer))
       .then(async result => {
         if (result === false) {
           return;
