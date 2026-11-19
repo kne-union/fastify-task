@@ -87,7 +87,7 @@ module.exports = fp(async (fastify, options) => {
     if (!updated) {
       return;
     }
-    await log({ id, message: message || '进度回调', data: JSON.stringify({ code, data, message, progress }) });
+    await log({ id, message: message || '进度回调', data: { code, data, message, progress } });
   };
 
   const callback = async ({ id, code, data, message, progress }) => {
@@ -100,7 +100,7 @@ module.exports = fp(async (fastify, options) => {
     }
 
     const result = { code, data, message };
-    await log({ id, message: '回调结果', data: JSON.stringify(result) });
+    await log({ id, message: '回调结果', data: result });
     const input = Object.assign(
       {},
       { id },

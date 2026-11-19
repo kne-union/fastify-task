@@ -135,7 +135,7 @@ describe('@kne/fastify-task - cancelHandler 与回调进度上报', function () 
       expect(handler.called).to.be.false;
       expect(current.options.logs).to.have.length(1);
       expect(current.options.logs[0].message).to.equal('解析中');
-      expect(JSON.parse(current.options.logs[0].data)).to.deep.equal({ code: 0, data: { step: 'parse' }, message: '解析中', progress: 40 });
+      expect(current.options.logs[0].data).to.deep.equal({ code: 0, data: { step: 'parse' }, message: '解析中', progress: 40 });
     });
 
     it('should finish the task with the final callback after progress reports', async () => {
@@ -151,6 +151,7 @@ describe('@kne/fastify-task - cancelHandler 与回调进度上报', function () 
       expect(current.progress).to.equal(100);
       expect(current.output).to.deep.equal({ ok: true });
       expect(handler.calledOnce).to.be.true;
+      expect(current.options.logs[0].data).to.deep.equal({ code: 0, data: { ok: true }, message: 'done' });
     });
 
     it('should treat progress 100 as the final result', async () => {
