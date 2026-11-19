@@ -368,7 +368,7 @@ module.exports = fp(async (fastify, options) => {
       schema: {
         tags: [CALLBACK_TAG],
         summary: '任务回调',
-        description: `外部服务回传任务结果：先把回调内容记入任务日志，code 为 0 时任务成功（data 作为输出），否则任务失败（message 作为错误）；code 为 0 且传了小于 100 的 progress 时只上报进度（更新任务 progress 并记日志，任务保持原状态）；${SIGNATURE_HINT}。该接口不鉴权`,
+        description: `外部服务回传任务结果：先把回调内容记入任务日志，code 为 0 时任务成功（data 作为输出），否则任务失败（message 作为错误）；code 为 0 且传了小于 100 的 progress 时只上报进度（更新任务 progress 并记日志，任务保持原状态）；任务已结束后再回调返回 409；${SIGNATURE_HINT}。该接口不鉴权`,
         body: {
           type: 'object',
           properties: {
@@ -410,7 +410,7 @@ module.exports = fp(async (fastify, options) => {
             }
           }
         },
-        response: { 200: { description: '处理完成，响应体为空' } }
+        response: { 200: { description: '处理完成，响应体为空' }, 409: { description: '任务已结束（成功 / 失败 / 已取消），不再接受回调' } }
       }
     },
     async request => {

@@ -92,9 +92,9 @@ module.exports = fp(async (fastify, options) => {
 
   const callback = async ({ id, code, data, message, progress }) => {
     const task = await context.detail({ id });
-    // 任务已结束（success / failed / canceled）后不再接受回调：不记日志、不改状态，避免迟到或重复的回调污染任务
+    // 任务已结束（success / failed / canceled）后拒绝回调：不记日志、不改状态，避免迟到或重复的回调污染任务
     if (context.isTerminalStatus(task.status)) {
-      return;
+      throw Object.assign(new Error('任务已结束，不再接受回调'), { statusCode: 409 });
     }
 
     const currentProgress = normalizeProgress(progress);

@@ -174,12 +174,12 @@ describe('@kne/fastify-task - cancelHandler 与回调进度上报', function () 
       expect(current.error).to.include('upstream error');
     });
 
-    it('should ignore progress reports for tasks that are no longer active', async () => {
+    it('should reject progress reports for tasks that are no longer active', async () => {
       await setup();
       const task = await createTask();
       await fastify.task.services.cancel({ id: task.id });
 
-      await fastify.task.services.callback({ id: task.id, code: 0, progress: 60 });
+      await expectRejected(fastify.task.services.callback({ id: task.id, code: 0, progress: 60 }));
 
       const current = await fastify.task.services.detail({ id: task.id });
       expect(current.status).to.equal('canceled');
@@ -242,16 +242,28 @@ describe('@kne/fastify-task - cancelHandler 与回调进度上报', function () 
       expect((await fastify.task.services.detail({ id: task.id })).status).to.equal('running');
     });
 
-    it('should ignore callbacks after the task has succeeded', async () => {
+    const expectRejected = async promise => {
+      let error;
+      try {
+        await promise;
+      } catch (e) {
+        error = e;
+      }
+      expect(error, '应当拒绝回调').to.exist;
+      expect(error.message).to.equal('任务已结束，不再接受回调');
+      expect(error.statusCode).to.equal(409);
+    };
+
+    it('should reject callbacks after the task has succeeded', async () => {
       const handler = sinon.stub().resolves();
       const errorHandler = sinon.stub().resolves();
       await setup({ 'test-type': { handler, errorHandler } });
       const task = await createTask();
 
       await fastify.task.services.callback({ id: task.id, code: 0, data: { first: true } });
-      await fastify.task.services.callback({ id: task.id, code: 0, data: { second: true } });
-      await fastify.task.services.callback({ id: task.id, code: 1, message: 'late failure' });
-      await fastify.task.services.callback({ id: task.id, code: 0, progress: 50 });
+      await expectRejected(fastify.task.services.callback({ id: task.id, code: 0, data: { second: true } }));
+      await expectRejected(fastify.task.services.callback({ id: task.id, code: 1, message: 'late failure' }));
+      await expectRejected(fastify.task.services.callback({ id: task.id, code: 0, progress: 50 }));
 
       const current = await fastify.task.services.detail({ id: task.id });
       expect(current.status).to.equal('success');
@@ -262,21 +274,33 @@ describe('@kne/fastify-task - cancelHandler 与回调进度上报', function () 
       expect(current.options.logs).to.have.length(1);
     });
 
-    it('should ignore callbacks after the task has failed or been canceled', async () => {
+    it('should reject callbacks after the task has failed or been canceled', async () => {
       await setup();
       const failed = await createTask();
       await fastify.task.services.callback({ id: failed.id, code: 1, message: 'boom' });
-      await fastify.task.services.callback({ id: failed.id, code: 0, data: { ok: true } });
+      await expectRejected(fastify.task.services.callback({ id: failed.id, code: 0, data: { ok: true } }));
       const failedTask = await fastify.task.services.detail({ id: failed.id });
       expect(failedTask.status).to.equal('failed');
       expect(failedTask.options.logs).to.have.length(1);
 
       const canceled = await createTask();
       await fastify.task.services.cancel({ id: canceled.id });
-      await fastify.task.services.callback({ id: canceled.id, code: 0, data: { ok: true } });
+      await expectRejected(fastify.task.services.callback({ id: canceled.id, code: 0, data: { ok: true } }));
       const canceledTask = await fastify.task.services.detail({ id: canceled.id });
       expect(canceledTask.status).to.equal('canceled');
       expect(canceledTask.options.logs || []).to.have.length(0);
+    });
+
+    it('POST /callback should respond 409 once the task is finished', async () => {
+      await setup();
+      const task = await createTask();
+      const url = `/api/task/callback?taskId=${task.id}`;
+
+      expect((await fastify.inject({ method: 'POST', url, payload: { code: 0, data: { ok: true } } })).statusCode).to.equal(200);
+      const response = await fastify.inject({ method: 'POST', url, payload: { code: 0, data: { again: true } } });
+
+      expect(response.statusCode).to.equal(409);
+      expect((await fastify.task.services.detail({ id: task.id })).output).to.deep.equal({ ok: true });
     });
 
     describe('签名', () => {
