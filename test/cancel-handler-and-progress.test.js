@@ -242,6 +242,43 @@ describe('@kne/fastify-task - cancelHandler 与回调进度上报', function () 
       expect((await fastify.task.services.detail({ id: task.id })).status).to.equal('running');
     });
 
+    it('should ignore callbacks after the task has succeeded', async () => {
+      const handler = sinon.stub().resolves();
+      const errorHandler = sinon.stub().resolves();
+      await setup({ 'test-type': { handler, errorHandler } });
+      const task = await createTask();
+
+      await fastify.task.services.callback({ id: task.id, code: 0, data: { first: true } });
+      await fastify.task.services.callback({ id: task.id, code: 0, data: { second: true } });
+      await fastify.task.services.callback({ id: task.id, code: 1, message: 'late failure' });
+      await fastify.task.services.callback({ id: task.id, code: 0, progress: 50 });
+
+      const current = await fastify.task.services.detail({ id: task.id });
+      expect(current.status).to.equal('success');
+      expect(current.output).to.deep.equal({ first: true });
+      expect(current.progress).to.equal(100);
+      expect(handler.calledOnce).to.be.true;
+      expect(errorHandler.called).to.be.false;
+      expect(current.options.logs).to.have.length(1);
+    });
+
+    it('should ignore callbacks after the task has failed or been canceled', async () => {
+      await setup();
+      const failed = await createTask();
+      await fastify.task.services.callback({ id: failed.id, code: 1, message: 'boom' });
+      await fastify.task.services.callback({ id: failed.id, code: 0, data: { ok: true } });
+      const failedTask = await fastify.task.services.detail({ id: failed.id });
+      expect(failedTask.status).to.equal('failed');
+      expect(failedTask.options.logs).to.have.length(1);
+
+      const canceled = await createTask();
+      await fastify.task.services.cancel({ id: canceled.id });
+      await fastify.task.services.callback({ id: canceled.id, code: 0, data: { ok: true } });
+      const canceledTask = await fastify.task.services.detail({ id: canceled.id });
+      expect(canceledTask.status).to.equal('canceled');
+      expect(canceledTask.options.logs || []).to.have.length(0);
+    });
+
     describe('签名', () => {
       const sign = ({ secret, id, payload }) =>
         crypto
