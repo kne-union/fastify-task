@@ -1,25 +1,26 @@
 ### 配置项
 
-| 属性名                       | 类型          | 必填 | 默认值           | 说明                                                                                                      |
-| ---------------------------- | ------------- | ---- | ---------------- | --------------------------------------------------------------------------------------------------------- |
-| `dbTableNamePrefix`          | string        | 否   | `'t_'`           | 数据库表名前缀                                                                                            |
-| `prefix`                     | string        | 否   | `'/api/task'`    | API 路由前缀                                                                                              |
-| `name`                       | string        | 否   | `'task'`         | 插件命名空间名称                                                                                          |
-| `limit`                      | number        | 否   | `10`             | 系统任务并发执行上限                                                                                      |
-| `dir`                        | string        | 否   | `'libs/tasks'`   | 任务脚本目录（向后兼容，优先级高于 dirs）                                                                 |
-| `dirs`                       | array         | 否   | `null`           | 任务脚本目录列表，运行时可通过 `append` 动态添加                                                          |
-| `cronTime`                   | string        | 否   | `'*/10 * * * *'` | 定时任务 Cron 表达式                                                                                      |
-| `scriptName`                 | string        | 否   | `'index'`        | 默认任务脚本名称                                                                                          |
-| `maxPollTimes`               | number        | 否   | `20`             | 最大轮询次数                                                                                              |
-| `pollInterval`               | number        | 否   | `10000`          | 轮询间隔（毫秒）                                                                                          |
-| `taskTimeout`                | number        | 否   | `1800000`        | 任务执行超时时间（毫秒），0 表示不超时                                                                    |
-| `recoverRunningTaskAfter`    | number / null | 否   | `null`           | 启动恢复 running 任务的陈旧阈值（毫秒）；未传时使用 `taskTimeout`，若 `taskTimeout` 为 0 则使用 `1800000` |
-| `recoverRunningTasksOnStart` | boolean       | 否   | `true`           | 启动时是否恢复陈旧 running 任务                                                                           |
-| `retryBaseDelay`             | number        | 否   | `5000`           | 重试基础延迟（毫秒），实际延迟 = `retryBaseDelay * 2^(retryCount-1)`                                      |
-| `errorHandler`               | function      | 否   | -                | 全局错误处理函数，任务级 `errorHandler` 未配置或抛错时调用                                                |
-| `getUserModel`               | function      | 否   | -                | 获取用户 Model 的函数                                                                                     |
-| `getAuthenticate`            | function      | 否   | -                | 获取认证中间件的函数                                                                                      |
-| `task`                       | object        | 否   | `{}`             | 主项目任务声明，支持 `{ [type]: handler }` 或 `{ [type]: { handler, errorHandler, next } }`               |
+| 属性名                       | 类型          | 必填 | 默认值           | 说明                                                                                                       |
+| ---------------------------- | ------------- | ---- | ---------------- | ---------------------------------------------------------------------------------------------------------- |
+| `dbTableNamePrefix`          | string        | 否   | `'t_'`           | 数据库表名前缀                                                                                             |
+| `prefix`                     | string        | 否   | `'/api/task'`    | API 路由前缀                                                                                               |
+| `name`                       | string        | 否   | `'task'`         | 插件命名空间名称                                                                                           |
+| `limit`                      | number        | 否   | `10`             | 系统任务并发执行上限                                                                                       |
+| `dir`                        | string        | 否   | `'libs/tasks'`   | 任务脚本目录（向后兼容，优先级高于 dirs）                                                                  |
+| `dirs`                       | array         | 否   | `null`           | 任务脚本目录列表，运行时可通过 `append` 动态添加                                                           |
+| `cronTime`                   | string        | 否   | `'*/10 * * * *'` | 定时任务 Cron 表达式                                                                                       |
+| `scriptName`                 | string        | 否   | `'index'`        | 默认任务脚本名称                                                                                           |
+| `maxPollTimes`               | number        | 否   | `20`             | 最大轮询次数                                                                                               |
+| `pollInterval`               | number        | 否   | `10000`          | 轮询间隔（毫秒）                                                                                           |
+| `taskTimeout`                | number        | 否   | `1800000`        | 任务执行超时时间（毫秒），0 表示不超时                                                                     |
+| `recoverRunningTaskAfter`    | number / null | 否   | `null`           | 启动恢复 running 任务的陈旧阈值（毫秒）；未传时使用 `taskTimeout`，若 `taskTimeout` 为 0 则使用 `1800000`  |
+| `recoverRunningTasksOnStart` | boolean       | 否   | `true`           | 启动时是否恢复陈旧 running 任务                                                                            |
+| `retryBaseDelay`             | number        | 否   | `5000`           | 重试基础延迟（毫秒），实际延迟 = `retryBaseDelay * 2^(retryCount-1)`                                       |
+| `errorHandler`               | function      | 否   | -                | 全局错误处理函数，任务级 `errorHandler` 未配置或抛错时调用                                                 |
+| `cancelHandler`              | function      | 否   | -                | 全局取消处理函数，任务级 `cancelHandler` 未配置时调用，任务被取消后触发                                    |
+| `getUserModel`               | function      | 否   | -                | 获取用户 Model 的函数                                                                                      |
+| `getAuthenticate`            | function      | 否   | -                | 获取认证中间件的函数                                                                                       |
+| `task`                       | object        | 否   | `{}`             | 主项目任务声明，支持 `{ [type]: handler }` 或 `{ [type]: { handler, errorHandler, cancelHandler, next } }` |
 
 > **关键设计**：`dirs` 初始化逻辑 — 优先使用用户传入的 `dirs`，否则以 `dir` 为默认值；若 `dirs` 中不包含 `dir`，则将 `dir`
 > 插入 `dirs` 首位，保证向后兼容。
@@ -103,7 +104,7 @@
 
 #### POST `{prefix}/cancel`
 
-取消任务，需 `write` 权限。支持单个取消（`id`）或批量取消（`targetId` + `targetType` + `type`）。
+取消任务，需 `write` 权限。支持单个取消（`id`）或批量取消（`targetId` + `targetType` + `type`）。只有 `pending` / `running` 的任务会被取消，每个被取消的任务会触发一次 `cancelHandler`（见「取消处理」）。
 
 | 参数名     | 类型   | 必填 | 说明                                                  |
 | ---------- | ------ | ---- | ----------------------------------------------------- |
@@ -174,16 +175,19 @@
 
 #### POST `{prefix}/callback`
 
-任务回调，无需认证。当任务设置了 `context.secret` 时需提供签名。
+任务回调，无需认证。当任务设置了 `context.secret` 时需提供签名。同一个接口既用于上报最终结果，也用于上报中间进度（见「回调进度上报」）。
 
-| 参数名    | 类型   | 必填 | 说明                                               |
-| --------- | ------ | ---- | -------------------------------------------------- |
-| id        | string | 否   | 任务ID（body）                                     |
-| taskId    | string | 否   | 任务ID（query，替代 body 中的 `id`）               |
-| code      | number | 是   | 状态码，0 为成功                                   |
-| data      | object | 否   | 回调数据                                           |
-| message   | string | 否   | 回调消息                                           |
-| signature | string | 否   | HMAC-SHA256 签名（当 `context.secret` 存在时必填） |
+| 参数名    | 类型   | 必填 | 说明                                                |
+| --------- | ------ | ---- | --------------------------------------------------- |
+| id        | string | 否   | 任务ID（body）                                      |
+| taskId    | string | 否   | 任务ID（query，替代 body 中的 `id`）                |
+| code      | number | 是   | 状态码，0 为成功                                    |
+| data      | object | 否   | 回调数据                                            |
+| message   | string | 否   | 回调消息                                            |
+| progress  | number | 否   | 任务进度 0-100；`code` 为 0 且小于 100 时仅上报进度 |
+| signature | string | 否   | HMAC-SHA256 签名（当 `context.secret` 存在时必填）  |
+
+> `code` 必填，缺失时接口返回 400，任务状态不变（此前缺失会被当作失败回调）。
 
 成功处理时返回空对象：
 
@@ -294,13 +298,13 @@ SSE 实时推送任务统计数据，需 `statistics` 权限。
 
 #### 回调与日志
 
-| 方法签名                                                                 | 说明                                        |
-| ------------------------------------------------------------------------ | ------------------------------------------- |
-| `services.processNext({ id, signature, result })`                        | 处理等待回调的任务，需签名验证              |
-| `services.callback({ id, code, data, message })`                         | 任务回调（内部调用，无需签名）              |
-| `services.callbackWithSignature({ id, code, data, message, signature })` | 任务回调（外部调用，需签名验证）            |
-| `services.log({ id, taskId, data, message })`                            | 记录日志（内部调用，无需签名），最多 100 条 |
-| `services.logWithSignature({ id, taskId, data, message, signature })`    | 记录日志（外部调用，需签名验证）            |
+| 方法签名                                                                           | 说明                                        |
+| ---------------------------------------------------------------------------------- | ------------------------------------------- |
+| `services.processNext({ id, signature, result })`                                  | 处理等待回调的任务，需签名验证              |
+| `services.callback({ id, code, data, message, progress })`                         | 任务回调（内部调用，无需签名）              |
+| `services.callbackWithSignature({ id, code, data, message, progress, signature })` | 任务回调（外部调用，需签名验证）            |
+| `services.log({ id, taskId, data, message })`                                      | 记录日志（内部调用，无需签名），最多 100 条 |
+| `services.logWithSignature({ id, taskId, data, message, signature })`              | 记录日志（外部调用，需签名验证）            |
 
 #### 系统调度
 
@@ -448,6 +452,62 @@ SSE 实时推送任务统计数据，需 `statistics` 权限。
 | `options.errorHandler`     | 未配置任务级错误处理，或任务级错误处理抛错时调用 |
 
 > **关键设计**：自动重试期间不会触发最终错误处理；只有任务最终进入 `failed` 状态时才调用错误处理函数。
+
+#### 取消处理
+
+`cancel` 把任务置为 `canceled` 后，会通知任务声明的取消处理器，方便业务把自己的状态（如关联的业务记录）同步为已取消。
+
+| 处理器                      | 触发时机                     |
+| --------------------------- | ---------------------------- |
+| `tasks[type].cancelHandler` | 任务被取消后优先调用         |
+| `options.cancelHandler`     | 未配置任务级取消处理器时调用 |
+
+处理器参数为 `{ task, context }`，其中 `task.status` 已是 `canceled`。
+
+```js
+fastify.register(fastifyTask, {
+  task: {
+    Readiness: {
+      handler: onSuccess,
+      errorHandler: onFailed,
+      // 任务被取消后，把关联的业务数据同步为已取消
+      cancelHandler: async ({ task }) => {
+        await markCanceled(task.context.runId);
+      }
+    }
+  }
+});
+```
+
+> **关键设计**：只有本次 `cancel` 真正完成 `pending` / `running` → `canceled` 的任务才会触发处理器，已结束的任务不会重复通知；批量取消按任务逐个触发。取消已经生效，处理器抛错只记录日志，不会让 `cancel` 失败。
+
+#### 回调进度上报
+
+外部服务使用同一个 `{prefix}/callback` 接口上报进度和最终结果，由 `code` 与 `progress` 的组合决定含义：
+
+| `code` | `progress`   | 含义                                                            |
+| ------ | ------------ | --------------------------------------------------------------- |
+| `0`    | `0` ~ `<100` | 进度上报：更新任务 `progress`，记一条日志，任务保持原状态不结束 |
+| `0`    | 不传 / `100` | 最终成功：与原行为一致，任务置为 `success` 并触发 `handler`     |
+| 非 `0` | 任意         | 最终失败：任务置为 `failed`（`message` 作为错误）并触发错误处理 |
+
+```js
+// 上报进度（任务继续保持 running）
+await fetch(`${origin}/api/task/callback?taskId=${taskId}`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ code: 0, progress: 40, message: '解析简历中' })
+});
+
+// 上报最终结果（不带 progress，行为与之前一致）
+await fetch(`${origin}/api/task/callback?taskId=${taskId}`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ code: 0, data: { score: 90 } })
+});
+```
+
+> **关键设计**：进度上报只对 `pending` / `running` / `waiting` 的任务生效，任务已结束（含已取消）时静默忽略，不写日志；`progress` 会四舍五入为整数，超出 0-100 时接口返回 400。进度上报不会触发 `handler`、`next` 与错误处理。
 
 #### next 链式任务
 
@@ -633,11 +693,11 @@ module.exports = async (fastify, options, { task }) => {
 
 使用 HMAC-SHA256 算法，签名数据格式为 `{id}|{data}`，其中 `data` 为 JSON 字符串或原始字符串。
 
-| 接口                    | 签名 data 内容                               |
-| ----------------------- | -------------------------------------------- |
-| `processNext`           | `result` 参数值（原始 JSON 字符串）          |
-| `logWithSignature`      | `{ data, message }` 对象的 JSON 序列化       |
-| `callbackWithSignature` | `{ code, data, message }` 对象的 JSON 序列化 |
+| 接口                    | 签名 data 内容                                                                                                    |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `processNext`           | `result` 参数值（原始 JSON 字符串）                                                                               |
+| `logWithSignature`      | `{ data, message }` 对象的 JSON 序列化                                                                            |
+| `callbackWithSignature` | `{ code, data, message, progress }` 对象的 JSON 序列化（未传 `progress` 时与 `{ code, data, message }` 完全一致） |
 
 > **关键设计**：未设置 `context.secret` 时 `verifySignature` 直接返回 `true`，不阻塞无密钥任务的回调。
 

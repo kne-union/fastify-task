@@ -21,19 +21,23 @@ module.exports = fp(async (fastify, options) => {
           [Op.in]: ['pending', 'running']
         }
       };
-      const tasksToCancel = await models.task.findAll({ where: bulkWhere, raw: true });
-      const completedAt = new Date();
-      const [affectedCount] = await models.task.update(
-        {
-          status: 'canceled',
-          completedAt
-        },
-        {
-          where: bulkWhere
+      const tasksToCancel = await models.task.findAll({ where: bulkWhere });
+      let affectedCount = 0;
+      for (const task of tasksToCancel) {
+        const transitioned = await context.updateTaskByStatus({
+          task,
+          allowedStatuses: ['pending', 'running'],
+          updateData: {
+            status: 'canceled',
+            completedAt: new Date()
+          }
+        });
+        if (!transitioned) {
+          continue;
         }
-      );
-      for (const row of tasksToCancel) {
-        context.collectTaskStatistics(Object.assign({}, row, { status: 'canceled', completedAt }));
+        affectedCount++;
+        context.collectTaskStatistics(task);
+        await context.handleTaskCancel({ task });
       }
       return affectedCount;
     }
@@ -51,6 +55,7 @@ module.exports = fp(async (fastify, options) => {
         return;
       }
       context.collectTaskStatistics(task);
+      await context.handleTaskCancel({ task });
     }
   };
 

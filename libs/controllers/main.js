@@ -368,7 +368,7 @@ module.exports = fp(async (fastify, options) => {
       schema: {
         tags: [CALLBACK_TAG],
         summary: '任务回调',
-        description: `外部服务回传任务最终结果：先把回调内容记入任务日志，code 为 0 时任务成功（data 作为输出），否则任务失败（message 作为错误）；${SIGNATURE_HINT}。该接口不鉴权`,
+        description: `外部服务回传任务结果：先把回调内容记入任务日志，code 为 0 时任务成功（data 作为输出），否则任务失败（message 作为错误）；code 为 0 且传了小于 100 的 progress 时只上报进度（更新任务 progress 并记日志，任务保持原状态）；${SIGNATURE_HINT}。该接口不鉴权`,
         body: {
           type: 'object',
           properties: {
@@ -378,7 +378,7 @@ module.exports = fp(async (fastify, options) => {
             },
             code: {
               type: 'number',
-              description: '结果码，0 表示成功，其他表示失败'
+              description: '结果码（必填），0 表示成功，其他表示失败'
             },
             data: {
               type: 'object',
@@ -386,13 +386,20 @@ module.exports = fp(async (fastify, options) => {
             },
             message: {
               type: 'string',
-              description: '结果说明，失败时作为错误信息'
+              description: '结果说明，失败时作为错误信息；进度上报时作为日志说明'
+            },
+            progress: {
+              type: 'number',
+              minimum: 0,
+              maximum: 100,
+              description: '任务进度 0-100。code 为 0 且小于 100 时仅上报进度，任务不结束；不传或为 100 时按最终结果处理'
             },
             signature: {
               type: 'string',
               description: 'HMAC-SHA256签名'
             }
-          }
+          },
+          required: ['code']
         },
         query: {
           type: 'object',

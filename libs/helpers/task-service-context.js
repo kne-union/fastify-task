@@ -110,14 +110,17 @@ const createContext = (fastify, options) => {
       return { handler: config };
     }
     if (config && typeof config === 'object' && !Array.isArray(config)) {
-      const { handler, errorHandler, next } = config;
+      const { handler, errorHandler, cancelHandler, next } = config;
       if (handler != null && typeof handler !== 'function') {
         throw new Error(`任务 ${taskName} 的 handler 必须是一个函数`);
       }
       if (errorHandler != null && typeof errorHandler !== 'function') {
         throw new Error(`任务 ${taskName} 的 errorHandler 必须是一个函数`);
       }
-      return { handler, errorHandler, next };
+      if (cancelHandler != null && typeof cancelHandler !== 'function') {
+        throw new Error(`任务 ${taskName} 的 cancelHandler 必须是一个函数`);
+      }
+      return { handler, errorHandler, cancelHandler, next };
     }
     throw new Error(`任务 ${taskName} 的 handler 必须是一个函数`);
   };
@@ -137,6 +140,7 @@ const createContext = (fastify, options) => {
       scriptName: scriptName || (namespace === mainNamespace ? options.scriptName : 'index'),
       handler: normalizedConfig.handler,
       errorHandler: normalizedConfig.errorHandler,
+      cancelHandler: normalizedConfig.cancelHandler,
       next: normalizedConfig.next
     };
     options.taskRegistry[registryKey] = declaration;
@@ -242,6 +246,12 @@ const createContext = (fastify, options) => {
     return declaration.errorHandler;
   };
 
+  const getTaskCancelHandler = declaration => {
+    const legacyConfig = options.task[declaration.type] || (declaration.namespace === mainNamespace ? options.task[declaration.taskName] : null);
+    if (legacyConfig && typeof legacyConfig === 'object' && typeof legacyConfig.cancelHandler === 'function') return legacyConfig.cancelHandler;
+    return declaration.cancelHandler;
+  };
+
   const getTaskNext = declaration => {
     const legacyConfig = options.task[declaration.type] || (declaration.namespace === mainNamespace ? options.task[declaration.taskName] : null);
     if (legacyConfig && typeof legacyConfig === 'object' && Object.prototype.hasOwnProperty.call(legacyConfig, 'next')) return legacyConfig.next;
@@ -292,6 +302,22 @@ const createContext = (fastify, options) => {
       await task.reload();
     }
     return true;
+  };
+
+  // 任务被取消后的通知：任务级 cancelHandler 优先，未配置时调用全局 options.cancelHandler；
+  // 取消已经生效，处理器抛错只记录日志，不影响取消结果
+  const handleTaskCancel = async ({ task }) => {
+    const declaration = resolveTaskDeclaration(task.type);
+    const taskCancelHandler = declaration && getTaskCancelHandler(declaration);
+    const cancelHandler = typeof taskCancelHandler === 'function' ? taskCancelHandler : options.cancelHandler;
+    if (typeof cancelHandler !== 'function') {
+      return;
+    }
+    try {
+      await cancelHandler({ task, context: task.context });
+    } catch (e) {
+      fastify.log.error(e);
+    }
   };
 
   const handleTaskError = async ({ task, error }) => {
@@ -551,6 +577,7 @@ const createContext = (fastify, options) => {
     resolveTaskDeclaration,
     detail,
     failTask,
+    handleTaskCancel,
     create,
     executor,
     finalizeSuccess
