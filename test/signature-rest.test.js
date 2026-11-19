@@ -523,7 +523,7 @@ describe('@kne/fastify-task - signatures and rest endpoints', function () {
       expect(task.status).to.equal('success');
     });
 
-    it('POST /callback should not overwrite canceled task', async () => {
+    it('POST /callback should reject callback for canceled task without overwriting it', async () => {
       fastify = await createFastify();
       await fastify.ready();
 
@@ -539,7 +539,7 @@ describe('@kne/fastify-task - signatures and rest endpoints', function () {
         url: '/api/task/callback',
         payload: { id: created.id, code: 0, data: { result: 'done' }, message: 'Success' }
       });
-      expect(response.statusCode).to.equal(200);
+      expect(response.statusCode).to.equal(409);
 
       const task = await fastify.task.services.detail({ id: created.id });
       expect(task.status).to.equal('canceled');
